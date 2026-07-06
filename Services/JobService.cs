@@ -77,6 +77,10 @@ public sealed class JobService
 
     public Task<JobRecord?> ClaimAsync(string capability, string tier, string workerId, string? workerHostname, CancellationToken ct)
     {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        if (!WorkerClaimPolicy.CapabilityIsClaimable(worker, capability))
+            return Task.FromResult<JobRecord?>(null);
+
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
         var canClaim = BuildModelGate(workerHostname);
         var job = _queue.TryClaim(capability, tier, workerId, workerHostname, lease, canClaim);
@@ -89,9 +93,13 @@ public sealed class JobService
         string? workerHostname,
         CancellationToken ct)
     {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var readyCaps = WorkerClaimPolicy.ClaimableCapabilities(worker);
+        if (readyCaps.Count == 0)
+            return Task.FromResult<JobRecord?>(null);
+
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
         var canClaim = BuildModelGate(workerHostname);
-        var readyCaps = ResolveClaimCapabilities(capabilities, workerHostname);
         var job = _queue.TryClaimAny(readyCaps, workerId, workerHostname, lease, canClaim);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
     }
@@ -107,18 +115,6 @@ public sealed class JobService
             if (string.IsNullOrWhiteSpace(model)) return true;
             return WorkerModelCompatibility.CanRunModel(assets, model, hostname, job.Capability);
         };
-    }
-
-    private IReadOnlyList<string> ResolveClaimCapabilities(IReadOnlyList<string> requested, string? workerHostname)
-    {
-        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
-        var ready = worker?.ClaimReadyCapabilities;
-        if (ready is not { Count: > 0 }) return requested;
-
-        var readySet = new HashSet<string>(ready, StringComparer.OrdinalIgnoreCase);
-        return requested
-            .Where(c => !string.IsNullOrWhiteSpace(c) && readySet.Contains(c.Trim()))
-            .ToList();
     }
 
     /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).</summary>

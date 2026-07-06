@@ -31,13 +31,14 @@ import aiohttp
 import loboforge_agent as agent
 from loboforge_agent_common import (
     CHECK_IN_INTERVAL,
+    _lora_basenames_match,
     _normalize_lora_basename,
     _sync_lora_inventory,
     build_check_in_payload,
     extract_required_loras_from_assign,
+    resolve_claim_ready_capabilities,
     resolve_lora_sync_mode,
     sync_hub_active_loras,
-    worker_can_poll_capability,
     worker_can_run_assign,
     worker_has_lora,
 )
@@ -306,11 +307,12 @@ async def process_ef_job(
 
     if not worker_can_run_assign(state, assign, hostname=args.hostname, capability=capability):
         model_name = (assign.get("model") or "?").strip()
-        log.info(
-            "Releasing job %s — model %s not on worker (should have been skipped at claim)",
-            job_id[:8], model_name,
+        msg = (
+            f"server assigned job {job_id[:8]} with model {model_name} "
+            f"but worker check-in did not report readiness — claim gate bug"
         )
-        await ef_release(http, ef_base, worker_key, job_id)
+        log.error(msg)
+        await ef_fail(http, ef_base, worker_key, job_id, msg)
         return
 
     loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
@@ -383,6 +385,21 @@ async def ef_api_check_in_once(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    try:
+        models = await agent.get_available_models(args.comfyui_http)
+        agent_state["models"] = models
+        known = agent_state.setdefault("known_loras", [])
+        for name in models.get("loras") or []:
+            base_name = _normalize_lora_basename(name)
+            if base_name and not any(_lora_basenames_match(k, base_name) for k in known):
+                known.append(base_name)
+    except Exception as ex:
+        log.warning("Model inventory refresh before check-in failed: %s", ex)
+
+    caps = agent_state.get("forge_queue_capabilities") or []
+    claim_ready = resolve_claim_ready_capabilities(agent_state, caps, hostname=args.hostname)
+    agent_state["claim_ready_capabilities"] = claim_ready
+
     payload = build_check_in_payload(args, agent_state)
     payload["transport"] = "eventforge"
     try:
@@ -390,13 +407,20 @@ async def ef_api_check_in_once(
             if resp.status != 200:
                 body = await resp.text()
                 log.warning("EventForge check-in failed HTTP %s: %s", resp.status, body[:200])
+                agent_state["check_in_ok"] = False
                 return False
             data = await resp.json()
             ack = data.get("acknowledged_models") or []
-            log.info("EventForge check-in OK — %d models acknowledged", len(ack))
+            agent_state["check_in_ok"] = True
+            log.info(
+                "EventForge check-in OK — claim_ready=%s (%d loras ack)",
+                ",".join(claim_ready) or "none",
+                len(ack),
+            )
             return True
     except Exception as ex:
         log.warning("EventForge check-in error: %s", ex)
+        agent_state["check_in_ok"] = False
         return False
 
 
@@ -422,7 +446,7 @@ async def ef_consumer_loop(
     worker_key: str,
 ) -> None:
     log.info(
-        "EventForge consumer capabilities=%s worker_id=%s (server-side priority)",
+        "EventForge consumer capabilities=%s worker_id=%s (claims use check-in claim_ready only)",
         capabilities, args.hostname,
     )
     while True:
@@ -430,15 +454,16 @@ async def ef_consumer_loop(
             await asyncio.sleep(0.1)
             continue
 
-        pollable = [
-            cap for cap in capabilities
-            if worker_can_poll_capability(state, cap, hostname=args.hostname)
-        ]
-        if not pollable:
+        if not state.get("check_in_ok"):
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue
 
-        job = await ef_claim_any(http, ef_base, worker_key, pollable, args.hostname)
+        ready = list(state.get("claim_ready_capabilities") or [])
+        if not ready:
+            await asyncio.sleep(CLAIM_IDLE_SECS)
+            continue
+
+        job = await ef_claim_any(http, ef_base, worker_key, ready, args.hostname)
         if job is None:
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue
@@ -501,6 +526,8 @@ async def run_ef_agent(args: argparse.Namespace) -> None:
     http_timeout = aiohttp.ClientTimeout(total=120)
     prov_task = await start_sqs_background_provision(args, agent_state) if start_sqs_background_provision else None
     async with aiohttp.ClientSession(timeout=http_timeout) as http:
+        if not await ef_api_check_in_once(http, args, agent_state, ef_base, worker_key):
+            log.warning("Initial EventForge check-in failed — will not claim until check-in succeeds")
         tasks = [
             ef_consumer_loop(capabilities, args, agent_state, http, ef_base, worker_key),
             sqs_lora_prefetch_loop(http, args, agent_state),

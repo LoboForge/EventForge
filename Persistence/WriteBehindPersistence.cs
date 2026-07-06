@@ -71,7 +71,10 @@ public sealed class WriteBehindPersistence : BackgroundService
         await cmd.ExecuteNonQueryAsync(ct);
         await EnsureWorkerHostnameColumnAsync(conn, ct);
 
-        cmd.CommandText = "SELECT * FROM jobs";
+        cmd.CommandText = """
+            SELECT * FROM jobs
+            WHERE status IN ('Queued', 'Leased', 'Streaming')
+            """;
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         var loaded = 0;
         while (await reader.ReadAsync(ct))
