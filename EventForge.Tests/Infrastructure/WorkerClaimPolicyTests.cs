@@ -23,11 +23,38 @@ public sealed class WorkerClaimPolicyTests
     }
 
     [Fact]
-    public void ClaimableCapabilities_empty_when_claim_ready_empty()
+    public void ClaimableCapabilities_empty_when_claim_ready_empty_for_gen_worker()
     {
         var worker = ReadyWorker();
         WorkerClaimPolicy.ClaimableCapabilities(worker).Should().BeEmpty();
         WorkerClaimPolicy.CanAttemptClaim(worker).Should().BeFalse();
+    }
+
+    [Fact]
+    public void ClaimableCapabilities_infers_caption_when_joycaption_omits_claim_ready()
+    {
+        var worker = new WorkerSnapshot
+        {
+            Hostname = "joycaption-44059162",
+            Capabilities = ["caption"],
+            ClaimReadyCapabilities = [],
+            CheckInStale = false,
+        };
+        WorkerClaimPolicy.ClaimableCapabilities(worker).Should().Equal("caption");
+        WorkerClaimPolicy.CanAttemptClaim(worker).Should().BeTrue();
+    }
+
+    [Fact]
+    public void ClaimableCapabilities_does_not_infer_wan_from_forge_caps_alone()
+    {
+        var worker = new WorkerSnapshot
+        {
+            Hostname = "loboforge-video-43612614",
+            Capabilities = ["wan", "ltx"],
+            ClaimReadyCapabilities = [],
+            CheckInStale = false,
+        };
+        WorkerClaimPolicy.ClaimableCapabilities(worker).Should().BeEmpty();
     }
 
     [Fact]
