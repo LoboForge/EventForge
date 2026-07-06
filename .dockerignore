@@ -1,0 +1,11 @@
+**/bin
+**/obj
+**/node_modules
+EventForge.Tests
+.git
+*.db
+artifacts
+publish-test
+ef-local.log
+ef-task-*.json
+secrets.local.json

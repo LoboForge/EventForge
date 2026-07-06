@@ -1,0 +1,47 @@
+# EventForge
+
+> Production-ready GPU fleet as a service. No provisioning your own boxes, no fleet management, no manual scaling. Submit jobs over HTTP, receive completions over WebSocket, pay per job.
+
+Canonical site: https://eventforge.loboforge.com/
+Agent / operator runbook (repo): event-forge/AGENTS.md
+Extended context for AI assistants: https://eventforge.loboforge.com/ai-context/eventforge-context.md
+Operator runbook (web): https://eventforge.loboforge.com/ai-context/agents.md
+Integration guide (LoboForge monorepo): https://github.com/loboforge/LoboForge.Studio/blob/main/docs/QueueIntegration.md
+Operator / coding agent runbook: https://eventforge.loboforge.com/ai-context/agents.md
+Sitemap: https://eventforge.loboforge.com/sitemap.xml
+
+## Primary pages
+
+- Home / product overview: https://eventforge.loboforge.com/
+- Ops console (authenticated, noindex): https://eventforge.loboforge.com/ops
+- AI integration context: https://eventforge.loboforge.com/ai-context/eventforge-context.md
+
+## What EventForge provides
+
+- HTTP job queue (`POST /v1/jobs`) scoped by app API key → `app_id`
+- WebSocket event bus (`WSS /v1/ws`) with subscribe + replay for offline clients
+- HTTP event replay (`GET /api/v1/events?since=…`) as fallback
+- Managed GPU worker fleet (check-in, claim, health, Vast.ai provisioning)
+- Artifact upload and storage via EventForge (`PUT /v1/jobs/{id}/output`)
+- Ops dashboard for fleet, queue, failures, and Vast rent/terminate
+
+## What integrators do NOT do
+
+- Provision or rent GPU boxes themselves
+- Manage worker bootstrap, scaling, or fleet health dashboards (unless using ops console)
+- Publish completion events (listen-only WebSocket)
+- Write job outputs directly to their own object storage (workers upload through EventForge)
+
+## Event types (WebSocket)
+
+- forge.job.started
+- forge.job.completed
+- forge.job.failed
+- forge.job.timeout
+- forge.job.released
+- forge.stream.token
+- forge.stream.done
+
+## Pricing model
+
+Usage-based per GPU job. Contact ops@loboforge.com for API keys and integration.

@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+**/node_modules/
+*.db
+artifacts/
+publish-test/
+ef-local.log
+secrets.local.json
+web/tsconfig.tsbuildinfo
+wwwroot/assets/
