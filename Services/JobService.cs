@@ -134,8 +134,8 @@ public sealed class JobService
         if (string.Equals(job.WorkerId, workerId, StringComparison.OrdinalIgnoreCase)) return job;
         if (job.Status != JobStatus.Queued) return null;
 
-        var worker = _fleet.TryGetWorker(workerId);
-        if (!string.Equals(worker?.CurrentJobUuid, jobId, StringComparison.OrdinalIgnoreCase)) return null;
+        var worker = _fleet.TryGetWorkerBusyOnJob(workerId, jobId);
+        if (worker == null) return null;
 
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
         if (!_queue.TryReclaimIfQueued(jobId, workerId, worker?.Hostname, lease)) return null;

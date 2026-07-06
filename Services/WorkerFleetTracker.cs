@@ -109,8 +109,25 @@ public sealed class WorkerFleetTracker
 
     public WorkerSnapshot? TryGetWorker(string workerKey)
     {
-        if (!_workers.TryGetValue(workerKey, out var stats)) return null;
-        return ToSnapshot(stats);
+        if (_workers.TryGetValue(workerKey, out var stats)) return ToSnapshot(stats);
+        foreach (var entry in _workers.Values)
+        {
+            if (string.Equals(entry.WorkerKey, workerKey, StringComparison.OrdinalIgnoreCase))
+                return ToSnapshot(entry);
+        }
+        return null;
+    }
+
+    public WorkerSnapshot? TryGetWorkerBusyOnJob(string authWorkerId, string jobId)
+    {
+        foreach (var stats in _workers.Values)
+        {
+            if (!string.Equals(stats.WorkerKey, authWorkerId, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(stats.CurrentJobUuid, jobId, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!stats.Busy) continue;
+            return ToSnapshot(stats);
+        }
+        return null;
     }
 
     public WorkerSnapshot? TryGetWorkerByHostname(string? hostname)
