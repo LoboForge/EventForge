@@ -131,13 +131,14 @@ async def send_file_ef(
         "Authorization": f"Bearer {session._key}",
         "Content-Type": mime_type,
     }
+    upload_timeout = aiohttp.ClientTimeout(total=600, sock_read=600)
     for attempt in range(1, UPLOAD_RETRIES + 1):
         try:
             if attempt > 1 and session._agent_state:
                 await ef_api_check_in_once(
                     session._http, session._args, session._agent_state, session._ef, session._key
                 )
-            async with session._http.put(url, data=data, headers=headers) as resp:
+            async with session._http.put(url, data=data, headers=headers, timeout=upload_timeout) as resp:
                 if resp.status == 503:
                     retry_after = int(resp.headers.get("Retry-After", "5"))
                     log.warning(
