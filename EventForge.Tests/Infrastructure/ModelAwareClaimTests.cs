@@ -30,6 +30,13 @@ public sealed class WorkerModelCompatibilityTests
         WorkerModelCompatibility.CanRunModel(assets, "music", "loboforge-ltx-43579394", "ltx")
             .Should().BeTrue();
     }
+    [Fact]
+    public void CanRunModel_allows_joycaption_on_joycaption_hostname_without_assets()
+    {
+        var assets = WorkerModelAssets.FromJson("{}");
+        WorkerModelCompatibility.CanRunModel(assets, "joycaption", "joycaption-44059162", "caption")
+            .Should().BeTrue();
+    }
 }
 
 public sealed class ModelAwareClaimTests
@@ -75,6 +82,34 @@ public sealed class ModelAwareClaimTests
         var claimed = queue.TryClaimAny(["ltx"], "wrath", "loboforge-ltx-43579394", TimeSpan.FromMinutes(5), CanClaim);
 
         claimed.Should().BeNull();
+    }
+
+    [Fact]
+    public void TryClaimAny_claims_caption_when_joycaption_hostname_has_no_models_json()
+    {
+        var queue = new InMemoryJobQueue();
+        queue.Enqueue(new JobRecord
+        {
+            JobId = "cap-1",
+            AppId = "app",
+            Capability = "caption",
+            Tier = "normal",
+            Kind = JobKind.Image,
+            PayloadJson = """{"type":"assign_job","model":"joycaption","caption":true}""",
+            Status = JobStatus.Queued,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        var assets = WorkerModelAssets.FromJson(null);
+        bool CanClaim(JobRecord job)
+        {
+            var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
+            return WorkerModelCompatibility.CanRunModel(assets, model, "joycaption-44059162", job.Capability);
+        }
+
+        var claimed = queue.TryClaimAny(["caption"], "wrath", "joycaption-44059162", TimeSpan.FromMinutes(5), CanClaim);
+
+        claimed.Should().NotBeNull();
+        claimed!.JobId.Should().Be("cap-1");
     }
 
     [Fact]

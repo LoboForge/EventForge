@@ -14,11 +14,18 @@ public static class WorkerModelCompatibility
         if (string.IsNullOrWhiteSpace(model))
             return true;
 
+        var lower = model.Trim().ToLowerInvariant();
+        var hn = hostname ?? "";
+
+        // JoyCaption/Ollama workers do not send Comfy model inventory on check-in.
+        if (lower is "joycaption" or "joy-caption" && HostnameIsJoycaption(hn))
+            return true;
+        if (lower == "dolphin" && HostnameIsOllama(hn))
+            return true;
+
         if (assets.Assets.Count == 0)
             return false;
 
-        var lower = model.Trim().ToLowerInvariant();
-        var hn = hostname ?? "";
         var imageOnly = HostnameIsImageOnly(hn);
         var videoOnly = HostnameIsWanOrVideoOnly(hn);
 
@@ -74,9 +81,13 @@ public static class WorkerModelCompatibility
                    || assets.Assets.Any(m => m.Contains("lens", StringComparison.OrdinalIgnoreCase));
 
         if (lower is "joycaption" or "joy-caption")
+        {
+            if (HostnameIsJoycaption(hn))
+                return true;
             return assets.Assets.Any(m =>
                 m.Contains("joycaption", StringComparison.OrdinalIgnoreCase)
                 || m.Contains("joy_caption", StringComparison.OrdinalIgnoreCase));
+        }
 
         if (!string.IsNullOrWhiteSpace(capability) && !string.Equals(capability, lower, StringComparison.OrdinalIgnoreCase))
         {
@@ -98,6 +109,12 @@ public static class WorkerModelCompatibility
         return assets.Assets.Contains(model, StringComparer.OrdinalIgnoreCase)
                || assets.Assets.Any(m => m.Contains(model, StringComparison.OrdinalIgnoreCase));
     }
+
+    private static bool HostnameIsJoycaption(string hostname) =>
+        hostname.Contains("joycaption", StringComparison.OrdinalIgnoreCase);
+
+    private static bool HostnameIsOllama(string hostname) =>
+        hostname.Contains("ollama", StringComparison.OrdinalIgnoreCase);
 
     private static bool HostnameIsImageOnly(string hostname)
     {
