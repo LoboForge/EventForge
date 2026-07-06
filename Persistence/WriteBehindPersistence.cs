@@ -89,10 +89,14 @@ public sealed class WriteBehindPersistence : BackgroundService
             var job = ReadJob(reader);
             if (job.Status is JobStatus.Leased or JobStatus.Streaming)
             {
-                job.Status = JobStatus.Queued;
-                job.WorkerId = null;
-                job.WorkerHostname = null;
-                job.LeasedUntil = null;
+                var leaseExpired = job.LeasedUntil is not { } until || until <= DateTimeOffset.UtcNow;
+                if (leaseExpired)
+                {
+                    job.Status = JobStatus.Queued;
+                    job.WorkerId = null;
+                    job.WorkerHostname = null;
+                    job.LeasedUntil = null;
+                }
             }
             _jobs.Load(job);
             loaded++;
@@ -116,10 +120,14 @@ public sealed class WriteBehindPersistence : BackgroundService
 
         if (fromDb.Status is JobStatus.Leased or JobStatus.Streaming)
         {
-            fromDb.Status = JobStatus.Queued;
-            fromDb.WorkerId = null;
-            fromDb.WorkerHostname = null;
-            fromDb.LeasedUntil = null;
+            var leaseExpired = fromDb.LeasedUntil is not { } until || until <= DateTimeOffset.UtcNow;
+            if (leaseExpired)
+            {
+                fromDb.Status = JobStatus.Queued;
+                fromDb.WorkerId = null;
+                fromDb.WorkerHostname = null;
+                fromDb.LeasedUntil = null;
+            }
         }
         _jobs.Load(fromDb);
         return fromDb;
