@@ -127,6 +127,25 @@ public sealed class JobService
         return _queue.TryExtendLease(jobUuid.Trim(), workerId, lease);
     }
 
+    private async Task<JobRecord?> ResolveJobForWorkerAsync(string jobId, string workerId, CancellationToken ct)
+    {
+        var job = await _persist.TryGetJobAsync(jobId, ct);
+        if (job == null) return null;
+        if (string.Equals(job.WorkerId, workerId, StringComparison.OrdinalIgnoreCase)) return job;
+        if (job.Status != JobStatus.Queued) return null;
+
+        var worker = _fleet.TryGetWorker(workerId);
+        if (!string.Equals(worker?.CurrentJobUuid, jobId, StringComparison.OrdinalIgnoreCase)) return null;
+
+        var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
+        if (!_queue.TryReclaimIfQueued(jobId, workerId, worker?.Hostname, lease)) return null;
+        _persist.MarkDirty();
+        _log.LogWarning(
+            "Reclaimed orphaned job {Job} for worker {Worker} host={Host}",
+            jobId, workerId, worker?.Hostname);
+        return _queue.Get(jobId);
+    }
+
     private async Task<JobRecord?> EmitClaimStartedAsync(JobRecord job, string workerId, CancellationToken ct)
     {
         _persist.MarkDirty();
@@ -270,8 +289,8 @@ public sealed class JobService
     public async Task<bool> SaveOutputStreamAsync(
         string jobId, string workerId, string fileName, string contentType, Stream body, CancellationToken ct)
     {
-        var job = await _persist.TryGetJobAsync(jobId, ct);
-        if (job == null || job.WorkerId != workerId) return false;
+        var job = await ResolveJobForWorkerAsync(jobId, workerId, ct);
+        if (job == null) return false;
 
         await using var buffer = new MemoryStream();
         await body.CopyToAsync(buffer, ct);
@@ -287,8 +306,8 @@ public sealed class JobService
 
     public async Task<JobRecord?> CompleteAsync(string jobId, string workerId, string? textReply, CancellationToken ct)
     {
-        var job = await _persist.TryGetJobAsync(jobId, ct);
-        if (job == null || job.WorkerId != workerId) return null;
+        var job = await ResolveJobForWorkerAsync(jobId, workerId, ct);
+        if (job == null) return null;
 
         if (!string.IsNullOrWhiteSpace(textReply))
             job.TextReply = textReply;

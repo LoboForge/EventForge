@@ -67,6 +67,24 @@ public sealed class InMemoryJobQueue
         }
     }
 
+    /// <summary>Re-lease a queued job when worker still holds it after ECS restart or lease orphan.</summary>
+    public bool TryReclaimIfQueued(string jobId, string workerId, string? workerHostname, TimeSpan lease)
+    {
+        lock (_lock)
+        {
+            if (!_jobs.TryGetValue(jobId, out var job)) return false;
+            if (job.Status != JobStatus.Queued) return false;
+            var idx = _queuedOrder.IndexOf(jobId);
+            if (idx < 0)
+            {
+                _queuedOrder.Add(jobId);
+                idx = _queuedOrder.Count - 1;
+            }
+            LeaseJobLocked(job, workerId, workerHostname, lease, idx);
+            return true;
+        }
+    }
+
     public JobRecord? TryClaim(string capability, string tier, string workerId, string? workerHostname, TimeSpan lease, Func<JobRecord, bool>? canClaim = null)
     {
         lock (_lock)
