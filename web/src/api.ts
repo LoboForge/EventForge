@@ -40,6 +40,9 @@ export async function opsFetchMaybe<T>(path: string, init: RequestInit = {}): Pr
 
 export type WorkerModels = {
   checkpoints: string[]
+  unets: string[]
+  clips: string[]
+  vaes: string[]
   loras: string[]
 }
 
@@ -151,15 +154,18 @@ function readStrList(raw: Record<string, unknown>, ...keys: string[]): string[] 
 }
 
 export function parseWorkerModels(modelsJson?: string | null): WorkerModels {
-  if (!modelsJson) return { checkpoints: [], loras: [] }
+  if (!modelsJson) return { checkpoints: [], unets: [], clips: [], vaes: [], loras: [] }
   try {
     const o = JSON.parse(modelsJson) as Record<string, unknown>
     return {
       checkpoints: Array.isArray(o.checkpoints) ? o.checkpoints.map(String) : [],
+      unets: Array.isArray(o.unets) ? o.unets.map(String) : [],
+      clips: Array.isArray(o.clips) ? o.clips.map(String) : [],
+      vaes: Array.isArray(o.vaes) ? o.vaes.map(String) : [],
       loras: Array.isArray(o.loras) ? o.loras.map(String) : [],
     }
   } catch {
-    return { checkpoints: [], loras: [] }
+    return { checkpoints: [], unets: [], clips: [], vaes: [], loras: [] }
   }
 }
 

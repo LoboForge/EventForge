@@ -65,7 +65,10 @@ function WorkerDetail({ w }: { w: WorkerRow }) {
         </div>
       </div>
       <div className="detail-grid">
+        <ModelList title="UNETs / diffusion" items={w.models.unets} />
         <ModelList title="Checkpoints" items={w.models.checkpoints} />
+        <ModelList title="Text encoders / CLIP" items={w.models.clips} />
+        <ModelList title="VAEs" items={w.models.vaes} />
         <ModelList title="LoRAs on disk (Comfy)" items={w.models.loras} />
         <div className="detail-block">
           <h4>Known LoRAs ({w.knownLoras.length})</h4>
