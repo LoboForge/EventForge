@@ -2017,8 +2017,19 @@ async def _handle_native_ltx_job(
         except Exception:
             pass
 
+    loop = asyncio.get_running_loop()
+
+    def on_activity_sync():
+        """Runner tick runs in asyncio task; schedule async lease heartbeat safely."""
+        try:
+            asyncio.run_coroutine_threadsafe(on_activity(), loop).result(timeout=10)
+        except Exception:
+            pass
+
     try:
-        result = await run_native_ltx_job(graph, on_progress=on_progress, on_activity=on_activity)
+        result = await run_native_ltx_job(
+            graph, on_progress=on_progress, on_activity=on_activity_sync
+        )
     except Exception as ex:
         log.error("Job %s: native LTX failed — %s", job_uuid, ex)
         await send_status("job_failed", reason=str(ex))

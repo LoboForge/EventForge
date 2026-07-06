@@ -75,12 +75,14 @@ class EfGpuSession:
         ef_base: str,
         worker_key: str,
         job_meta: dict[str, Any],
+        agent_state: dict[str, Any] | None = None,
     ):
         self._args = args
         self._http = http
         self._ef = ef_base
         self._key = worker_key
         self._meta = job_meta
+        self._agent_state = agent_state if agent_state is not None else {}
         self._uuid = args.node_uuid
         self._current_job: str | None = None
         self.uploaded_outputs: list[tuple[str, str]] = []
@@ -131,6 +133,10 @@ async def send_file_ef(
     }
     for attempt in range(1, UPLOAD_RETRIES + 1):
         try:
+            if attempt > 1 and session._agent_state:
+                await ef_api_check_in_once(
+                    session._http, session._args, session._agent_state, session._ef, session._key
+                )
             async with session._http.put(url, data=data, headers=headers) as resp:
                 if resp.status == 503:
                     retry_after = int(resp.headers.get("Retry-After", "5"))
@@ -139,6 +145,13 @@ async def send_file_ef(
                         job_uuid[:8], attempt, retry_after,
                     )
                     await asyncio.sleep(retry_after)
+                    continue
+                if resp.status == 404 and attempt < UPLOAD_RETRIES:
+                    log.warning(
+                        "Upload 404 job=%s attempt=%d — refreshing lease via check-in",
+                        job_uuid[:8], attempt,
+                    )
+                    await asyncio.sleep(2)
                     continue
                 if resp.status >= 400:
                     body = await resp.text()
@@ -346,7 +359,7 @@ async def process_ef_job(
         return
 
     state.get("_ef_lora_defer_counts", {}).pop(job_id, None)
-    session = EfGpuSession(args, http, ef_base, worker_key, job)
+    session = EfGpuSession(args, http, ef_base, worker_key, job, state)
     session.uploaded_outputs.clear()
     session.failed_reason = None
 

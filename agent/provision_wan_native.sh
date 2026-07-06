@@ -14,7 +14,7 @@ cd /workspace
 export LOBO_EXECUTOR="${LOBO_EXECUTOR:-comfy}"
 export LOBO_WAN="${LOBO_WAN:-1}"
 export LOBO_LTX23="${LOBO_LTX23:-0}"
-export LOBO_MUSIC="${LOBO_MUSIC:-0}"
+export LOBO_MUSIC="${LOBO_MUSIC:-1}"
 export LOBO_UNLOAD_MODELS="${LOBO_UNLOAD_MODELS:-0}"
 export LOBO_HOT_MODEL="${LOBO_HOT_MODEL:-wan}"
 export MODE="${MODE:-wan-native}"
@@ -108,4 +108,14 @@ else
     --hf-token "$HF_TOKEN" \
     >> /workspace/provision.log 2>&1 &
   echo "background Wan downloads pid=$!" | tee -a /workspace/provision.log
+fi
+
+# Music jobs use the ltx capability queue; video boxes need ACE-Step on disk.
+if [[ "${LOBO_MUSIC:-1}" != "0" ]]; then
+  ACE_SCRIPT="${EVENT_FORGE_URL:-https://eventforge.loboforge.com}/agent/install_ace_step.sh"
+  if curl -fsSL --max-time 30 "$ACE_SCRIPT" -o /tmp/install_ace_step.sh 2>/dev/null; then
+    chmod +x /tmp/install_ace_step.sh
+    nohup bash /tmp/install_ace_step.sh >> /workspace/provision.log 2>&1 &
+    echo "background ACE-Step download pid=$!" | tee -a /workspace/provision.log
+  fi
 fi

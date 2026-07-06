@@ -23,6 +23,7 @@ public static class AgentEndpoints
             "vast-agent-only-onstart.sh",
             "vast-heal-agent.sh",
             "worker-bootstrap-env.sh",
+            "install_ace_step.sh",
             "ltx-agent-watchdog.sh",
             "loboforge_worker.tar.gz",
             "forge-queue-sdk.tar.gz",

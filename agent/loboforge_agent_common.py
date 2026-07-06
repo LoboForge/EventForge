@@ -540,6 +540,12 @@ def worker_can_poll_capability(
     cap = (capability or "").strip().lower()
     if not cap:
         return False
+    if cap == "ltx" and _hostname_is_wan_or_video_only(hostname):
+        import os
+        ltx23 = (os.environ.get("LOBO_LTX23") or "0").strip().lower() not in ("0", "false", "no", "off")
+        music = (os.environ.get("LOBO_MUSIC") or "1").strip().lower() not in ("0", "false", "no", "off")
+        if music and not ltx23:
+            return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
     probe = _CAPABILITY_PROBE_MODEL.get(cap)
     if not probe:
         return True
