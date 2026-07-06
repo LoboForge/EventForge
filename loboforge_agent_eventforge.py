@@ -306,10 +306,6 @@ async def process_ef_job(
 
     if not worker_can_run_assign(state, assign, hostname=args.hostname, capability=capability):
         model_name = (assign.get("model") or "?").strip()
-        log.info(
-            "Releasing job %s — model %s not on worker (should have been skipped at claim)",
-            job_id[:8], model_name,
-        )
         await ef_release(http, ef_base, worker_key, job_id)
         return
 
@@ -434,11 +430,10 @@ async def ef_consumer_loop(
             cap for cap in capabilities
             if worker_can_poll_capability(state, cap, hostname=args.hostname)
         ]
-        if not pollable:
-            await asyncio.sleep(CLAIM_IDLE_SECS)
-            continue
+        job = None
+        if pollable:
+            job = await ef_claim_any(http, ef_base, worker_key, pollable, args.hostname)
 
-        job = await ef_claim_any(http, ef_base, worker_key, pollable, args.hostname)
         if job is None:
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue

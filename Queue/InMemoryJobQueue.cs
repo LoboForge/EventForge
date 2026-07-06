@@ -67,7 +67,7 @@ public sealed class InMemoryJobQueue
         }
     }
 
-    public JobRecord? TryClaim(string capability, string tier, string workerId, string? workerHostname, TimeSpan lease)
+    public JobRecord? TryClaim(string capability, string tier, string workerId, string? workerHostname, TimeSpan lease, Func<JobRecord, bool>? canClaim = null)
     {
         lock (_lock)
         {
@@ -78,6 +78,7 @@ public sealed class InMemoryJobQueue
                 if (!_jobs.TryGetValue(id, out var job)) continue;
                 if (job.Status != JobStatus.Queued) continue;
                 if (!CapabilityMatches(job, capability, tier)) continue;
+                if (canClaim != null && !canClaim(job)) continue;
 
                 return LeaseJobLocked(job, workerId, workerHostname, lease, i);
             }
@@ -89,7 +90,8 @@ public sealed class InMemoryJobQueue
         IReadOnlyList<string> capabilities,
         string workerId,
         string? workerHostname,
-        TimeSpan lease)
+        TimeSpan lease,
+        Func<JobRecord, bool>? canClaim = null)
     {
         lock (_lock)
         {
@@ -108,6 +110,7 @@ public sealed class InMemoryJobQueue
                 if (!_jobs.TryGetValue(id, out var job)) continue;
                 if (job.Status != JobStatus.Queued) continue;
                 if (!capSet.Contains(job.Capability)) continue;
+                if (canClaim != null && !canClaim(job)) continue;
 
                 if (bestJob == null || JobQueueOrdering.CompareForClaim(job, bestJob) < 0)
                 {

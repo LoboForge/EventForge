@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using EventForge.Configuration;
 using EventForge.Core;
+using EventForge.Infrastructure;
 using EventForge.Models;
 using EventForge.Persistence;
 using EventForge.Queue;
@@ -77,7 +78,8 @@ public sealed class JobService
     public Task<JobRecord?> ClaimAsync(string capability, string tier, string workerId, string? workerHostname, CancellationToken ct)
     {
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
-        var job = _queue.TryClaim(capability, tier, workerId, workerHostname, lease);
+        var canClaim = BuildModelGate(workerHostname);
+        var job = _queue.TryClaim(capability, tier, workerId, workerHostname, lease, canClaim);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
     }
 
@@ -88,8 +90,35 @@ public sealed class JobService
         CancellationToken ct)
     {
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
-        var job = _queue.TryClaimAny(capabilities, workerId, workerHostname, lease);
+        var canClaim = BuildModelGate(workerHostname);
+        var readyCaps = ResolveClaimCapabilities(capabilities, workerHostname);
+        var job = _queue.TryClaimAny(readyCaps, workerId, workerHostname, lease, canClaim);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
+    }
+
+    private Func<JobRecord, bool> BuildModelGate(string? workerHostname)
+    {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
+        var hostname = worker?.Hostname ?? workerHostname;
+        return job =>
+        {
+            var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
+            if (string.IsNullOrWhiteSpace(model)) return true;
+            return WorkerModelCompatibility.CanRunModel(assets, model, hostname, job.Capability);
+        };
+    }
+
+    private IReadOnlyList<string> ResolveClaimCapabilities(IReadOnlyList<string> requested, string? workerHostname)
+    {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var ready = worker?.ClaimReadyCapabilities;
+        if (ready is not { Count: > 0 }) return requested;
+
+        var readySet = new HashSet<string>(ready, StringComparer.OrdinalIgnoreCase);
+        return requested
+            .Where(c => !string.IsNullOrWhiteSpace(c) && readySet.Contains(c.Trim()))
+            .ToList();
     }
 
     /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).</summary>

@@ -131,30 +131,18 @@ def resolve_lora_sync_mode(hostname: str | None = None) -> str:
 
 def _find_comfy_models_root() -> Path | None:
     try:
-        from loboforge_worker.paths import find_models_root
+        from loboforge_worker.provision.paths import find_models_root
 
-        root = find_models_root(argparse.Namespace(hostname=os.environ.get("HOSTNAME", "")))
-        if root is not None:
-            return root
+        return find_models_root(argparse.Namespace(hostname=os.environ.get("HOSTNAME", "")))
     except Exception:
         pass
-    models_env = os.environ.get("MODELS")
-    if models_env:
-        mp = Path(models_env)
-        if mp.is_dir():
-            return mp if mp.name == "models" else mp / "models"
     for candidate in (
-        "/opt/workspace-internal/ComfyUI/models",
-        "/workspace/ComfyUI/models",
-        "/workspace/comfyui/models",
-        "/opt/ComfyUI/models",
-        "/ComfyUI/models",
-        "/root/ComfyUI/models",
-        "/root/comfyui/models",
+        Path("/workspace/ComfyUI/models"),
+        Path("/ComfyUI/models"),
+        Path.home() / "ComfyUI" / "models",
     ):
-        p = Path(candidate)
-        if p.is_dir():
-            return p
+        if candidate.is_dir():
+            return candidate
     return None
 
 
@@ -295,24 +283,10 @@ async def _sync_lora_inventory(state: dict, args) -> None:
             known.append(base)
 
 
-def resolve_claim_ready_capabilities(
-    state: dict,
-    capabilities: list[str] | tuple[str, ...],
-    *,
-    hostname: str | None = None,
-) -> list[str]:
-    """Capabilities this worker should poll — only those with required models on disk."""
-    return [
-        cap for cap in capabilities
-        if worker_can_poll_capability(state, cap, hostname=hostname)
-    ]
-
-
 def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]) -> dict[str, Any]:
     gpu_info = agent.get_gpu_info()
     models = agent_state.get("models") or {}
     caps = agent_state.get("forge_queue_capabilities") or []
-    claim_ready = resolve_claim_ready_capabilities(agent_state, caps, hostname=args.hostname)
     payload = {
         "node_uuid": args.node_uuid,
         "hostname": args.hostname,
@@ -328,7 +302,6 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "fleet_mode": agent.resolve_fleet_mode(args),
         "provision_mode": agent.resolve_fleet_mode(args),
         "forge_queue_capabilities": list(caps),
-        "claim_ready_capabilities": claim_ready,
         "capabilities": {
             "wd14": agent.WD14_AVAILABLE,
             "joycaption": agent.JOYCAPTION_AVAILABLE,

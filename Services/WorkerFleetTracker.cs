@@ -113,6 +113,18 @@ public sealed class WorkerFleetTracker
         return ToSnapshot(stats);
     }
 
+    public WorkerSnapshot? TryGetWorkerByHostname(string? hostname)
+    {
+        if (string.IsNullOrWhiteSpace(hostname)) return null;
+        var host = hostname.Trim();
+        foreach (var stats in _workers.Values)
+        {
+            if (string.Equals(stats.Hostname, host, StringComparison.OrdinalIgnoreCase))
+                return ToSnapshot(stats);
+        }
+        return null;
+    }
+
     public FleetSnapshot Snapshot()
     {
         var workers = SnapshotWorkers();

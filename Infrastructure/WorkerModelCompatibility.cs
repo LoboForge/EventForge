@@ -1,0 +1,162 @@
+namespace EventForge.Infrastructure;
+
+/// <summary>
+/// Mirror of agent/loboforge_agent_common.py worker_can_run_model — gate job claims by on-disk models.
+/// </summary>
+public static class WorkerModelCompatibility
+{
+    public static bool CanRunModel(
+        WorkerModelAssets assets,
+        string? model,
+        string? hostname,
+        string? capability)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+            return true;
+
+        if (assets.Assets.Count == 0)
+            return false;
+
+        var lower = model.Trim().ToLowerInvariant();
+        var hn = hostname ?? "";
+        var imageOnly = HostnameIsImageOnly(hn);
+        var videoOnly = HostnameIsWanOrVideoOnly(hn);
+
+        if (lower == "wan2t2v")
+        {
+            if (imageOnly) return false;
+            return HasWanT2V(assets);
+        }
+
+        if (lower is "wan2" or "wan2flf")
+        {
+            if (imageOnly) return false;
+            return HasWanI2V(assets);
+        }
+
+        if (lower.StartsWith("ltx23", StringComparison.Ordinal) || lower == "ltx23")
+        {
+            if (imageOnly) return false;
+            return assets.Assets.Any(LooksLikeLtxAsset);
+        }
+
+        if (lower is "music" or "ace-step")
+        {
+            if (imageOnly) return false;
+            return HasAceStep(assets);
+        }
+
+        if (videoOnly && (lower.StartsWith("flux", StringComparison.Ordinal)
+                          || lower is "storyboard" or "zimage" or "chroma" or "lens"))
+            return false;
+
+        if (lower.StartsWith("flux", StringComparison.Ordinal) || lower == "storyboard")
+        {
+            if (lower is "flux2klein" or "flux2klein-edit" or "flux2klein-dual")
+                return HasFluxKlein(assets) && HasFlux2TextEncoder(assets);
+            return HasFluxKlein(assets)
+                   || assets.Assets.Any(m => m.Contains("flux", StringComparison.OrdinalIgnoreCase)
+                                             || m.Contains("klein", StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (lower == "chroma")
+            return assets.Assets.Any(m => m.Contains("chroma", StringComparison.OrdinalIgnoreCase));
+
+        if (lower == "zimage")
+            return HasZImageTextEncoder(assets)
+                   || assets.Assets.Any(m =>
+                       m.Contains("zimage", StringComparison.OrdinalIgnoreCase)
+                       || m.Contains("z_image", StringComparison.OrdinalIgnoreCase)
+                       || m.Contains("z-image", StringComparison.OrdinalIgnoreCase));
+
+        if (lower == "lens")
+            return HasLensTextEncoder(assets)
+                   || assets.Assets.Any(m => m.Contains("lens", StringComparison.OrdinalIgnoreCase));
+
+        if (lower is "joycaption" or "joy-caption")
+            return assets.Assets.Any(m =>
+                m.Contains("joycaption", StringComparison.OrdinalIgnoreCase)
+                || m.Contains("joy_caption", StringComparison.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(capability) && !string.Equals(capability, lower, StringComparison.OrdinalIgnoreCase))
+        {
+            var expected = capability.Trim().ToLowerInvariant() switch
+            {
+                "flux-klein" => lower.StartsWith("flux", StringComparison.Ordinal) || lower == "storyboard",
+                "flux-klein-dual" => lower == "flux2klein-dual",
+                "flux-klein-edit" => lower is "flux2klein-edit" or "flux2klein-dual",
+                "zimage" => lower is "zimage" or "lens",
+                "chroma" => lower == "chroma",
+                "wan" => lower.StartsWith("wan", StringComparison.Ordinal),
+                "ltx" => lower.StartsWith("ltx", StringComparison.Ordinal) || lower is "music" or "ace-step",
+                "dolphin" => lower == "dolphin",
+                _ => (bool?)null,
+            };
+            if (expected == false) return false;
+        }
+
+        return assets.Assets.Contains(model, StringComparer.OrdinalIgnoreCase)
+               || assets.Assets.Any(m => m.Contains(model, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool HostnameIsImageOnly(string hostname)
+    {
+        var hn = hostname.ToLowerInvariant();
+        return hn.Contains("-image-", StringComparison.Ordinal) && !hn.Contains("-all-", StringComparison.Ordinal);
+    }
+
+    private static bool HostnameIsWanOrVideoOnly(string hostname)
+    {
+        var hn = hostname.ToLowerInvariant();
+        if (hn.Contains("-all-", StringComparison.Ordinal)) return false;
+        return hn.Contains("-wan-", StringComparison.Ordinal) || hn.Contains("-video-", StringComparison.Ordinal);
+    }
+
+    private static bool HasFluxKlein(WorkerModelAssets assets) =>
+        assets.Assets.Any(m =>
+        {
+            var ml = m.ToLowerInvariant();
+            return ml.Contains("klein") || ml.Contains("flux2") || ml.Contains("flux-2");
+        });
+
+    private static bool HasFlux2TextEncoder(WorkerModelAssets assets) =>
+        assets.Assets.Any(m => m.Contains("qwen", StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasZImageTextEncoder(WorkerModelAssets assets) =>
+        assets.Assets.Any(m => m.Contains("qwen_3_4b", StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasLensTextEncoder(WorkerModelAssets assets) =>
+        assets.Assets.Any(m => m.Contains("gpt_oss", StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasWanI2V(WorkerModelAssets assets) =>
+        assets.Unets.Any(m =>
+        {
+            var ml = m.ToLowerInvariant();
+            return ml.Contains("wan") && ml.Contains("i2v");
+        });
+
+    private static bool HasWanT2V(WorkerModelAssets assets) =>
+        assets.Unets.Any(m =>
+        {
+            var ml = m.ToLowerInvariant();
+            return (ml.Contains("wan") && ml.Contains("t2v"))
+                   || ml.Contains("t2v_low_noise")
+                   || ml.Contains("wan2.2_t2v");
+        });
+
+    private static bool HasAceStep(WorkerModelAssets assets) =>
+        assets.Assets.Any(m =>
+        {
+            var ml = m.ToLowerInvariant();
+            return ml.Contains("ace_step") || ml.Contains("ace-step");
+        });
+
+    private static bool LooksLikeLtxAsset(string name)
+    {
+        var ml = name.ToLowerInvariant();
+        if (ml.Contains("taeltx")) return false;
+        if (ml.Contains("ltx-2.3") || ml.Contains("ltx-2") || ml.Contains("ltx23") || ml.Contains("ltx2"))
+            return true;
+        return ml.Contains("ltx") && ml.Contains("gemma") || ml.Contains("gemma_3_12b");
+    }
+}
