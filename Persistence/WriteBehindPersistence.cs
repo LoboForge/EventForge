@@ -13,8 +13,10 @@ public sealed class WriteBehindPersistence : BackgroundService
     private readonly InMemoryJobQueue _jobs;
     private readonly IEventStore _events;
     private readonly ILogger<WriteBehindPersistence> _log;
-    private static readonly TimeSpan JobRetention = TimeSpan.FromDays(7);
     private static readonly TimeSpan JobPruneInterval = TimeSpan.FromHours(1);
+
+    private TimeSpan MemoryCacheRetention => TimeSpan.FromHours(Math.Max(1, _opts.JobCacheHours));
+    private TimeSpan DbRetention => TimeSpan.FromDays(Math.Max(1, _opts.EventRetentionDays));
 
     private volatile bool _loaded;
     private int _pendingWrites;
@@ -73,8 +75,13 @@ public sealed class WriteBehindPersistence : BackgroundService
 
         cmd.CommandText = """
             SELECT * FROM jobs
-            WHERE status IN ('Queued', 'Leased', 'Streaming')
+            WHERE status IN ($queued, $leased, $streaming)
+               OR COALESCE(completed_at, created_at) >= $memoryCutoff
             """;
+        cmd.Parameters.AddWithValue("$queued", JobStatus.Queued);
+        cmd.Parameters.AddWithValue("$leased", JobStatus.Leased);
+        cmd.Parameters.AddWithValue("$streaming", JobStatus.Streaming);
+        cmd.Parameters.AddWithValue("$memoryCutoff", (DateTimeOffset.UtcNow - MemoryCacheRetention).ToString("O"));
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         var loaded = 0;
         while (await reader.ReadAsync(ct))
@@ -91,7 +98,31 @@ public sealed class WriteBehindPersistence : BackgroundService
             loaded++;
         }
         _loaded = true;
-        _log.LogInformation("EventForge cache loaded {Count} jobs from SQLite", loaded);
+        _log.LogInformation(
+            "EventForge cache loaded {Count} jobs from SQLite (active + last {Hours}h terminal)",
+            loaded, MemoryCacheRetention.TotalHours);
+    }
+
+    /// <summary>Memory cache first; on miss load from SQLite and hydrate cache.</summary>
+    public async Task<JobRecord?> TryGetJobAsync(string jobId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(jobId)) return null;
+        var id = jobId.Trim();
+        var cached = _jobs.Get(id);
+        if (cached != null) return cached;
+
+        var fromDb = await ReadJobFromDbAsync(id, ct);
+        if (fromDb == null) return null;
+
+        if (fromDb.Status is JobStatus.Leased or JobStatus.Streaming)
+        {
+            fromDb.Status = JobStatus.Queued;
+            fromDb.WorkerId = null;
+            fromDb.WorkerHostname = null;
+            fromDb.LeasedUntil = null;
+        }
+        _jobs.Load(fromDb);
+        return fromDb;
     }
 
 
@@ -142,15 +173,19 @@ public sealed class WriteBehindPersistence : BackgroundService
 
     private async Task PruneOldJobsAsync(CancellationToken ct)
     {
-        var cutoff = DateTimeOffset.UtcNow - JobRetention;
-        var cutoffIso = cutoff.ToString("O");
-        var removedFromMemory = _jobs.PruneTerminalOlderThan(cutoff);
+        var memoryCutoff = DateTimeOffset.UtcNow - MemoryCacheRetention;
+        var removedFromMemory = _jobs.PruneTerminalOlderThan(memoryCutoff);
+
+        var dbCutoff = DateTimeOffset.UtcNow - DbRetention;
+        var dbCutoffIso = dbCutoff.ToString("O");
 
         var path = Path.GetFullPath(_opts.SqlitePath);
         if (!File.Exists(path))
         {
             if (removedFromMemory > 0)
-                _log.LogInformation("EventForge job prune: removed {Count} in-memory row(s) older than {Days} days", removedFromMemory, JobRetention.TotalDays);
+                _log.LogInformation(
+                    "EventForge memory prune: removed {Count} terminal row(s) older than {Hours}h",
+                    removedFromMemory, MemoryCacheRetention.TotalHours);
             return;
         }
 
@@ -164,14 +199,14 @@ public sealed class WriteBehindPersistence : BackgroundService
             """;
         cmd.Parameters.AddWithValue("$completed", JobStatus.Completed);
         cmd.Parameters.AddWithValue("$failed", JobStatus.Failed);
-        cmd.Parameters.AddWithValue("$cutoff", cutoffIso);
+        cmd.Parameters.AddWithValue("$cutoff", dbCutoffIso);
         var removedFromDb = await cmd.ExecuteNonQueryAsync(ct);
 
         if (removedFromMemory > 0 || removedFromDb > 0)
         {
             _log.LogInformation(
-                "EventForge job prune: removed {Memory} in-memory and {Db} SQLite row(s) older than {Days} days",
-                removedFromMemory, removedFromDb, JobRetention.TotalDays);
+                "EventForge job prune: memory {Memory} (>{Hours}h), SQLite {Db} (>{Days}d)",
+                removedFromMemory, MemoryCacheRetention.TotalHours, removedFromDb, DbRetention.TotalDays);
         }
     }
 
@@ -270,6 +305,21 @@ public sealed class WriteBehindPersistence : BackgroundService
         string.IsNullOrWhiteSpace(raw) ? null : DateTimeOffset.Parse(raw);
 
     private static SqliteConnection Open(string path) => new(new SqliteConnectionStringBuilder { DataSource = path }.ConnectionString);
+
+    private async Task<JobRecord?> ReadJobFromDbAsync(string jobId, CancellationToken ct)
+    {
+        var path = Path.GetFullPath(_opts.SqlitePath);
+        if (!File.Exists(path)) return null;
+
+        await using var conn = Open(path);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM jobs WHERE job_id = $id";
+        cmd.Parameters.AddWithValue("$id", jobId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return ReadJob(reader);
+    }
 
     private static void BindJob(SqliteCommand cmd, JobRecord job)
     {

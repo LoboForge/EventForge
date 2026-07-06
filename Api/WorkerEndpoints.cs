@@ -27,7 +27,7 @@ public static class WorkerEndpoints
             var payload = ParseCheckIn(root);
             fleet.RegisterCheckIn(workerId, payload);
             var leaseExtended = payload.Busy && !string.IsNullOrWhiteSpace(payload.CurrentJobUuid)
-                && jobs.ExtendLeaseOnCheckIn(workerId, payload.CurrentJobUuid);
+                && await jobs.ExtendLeaseOnCheckInAsync(workerId, payload.CurrentJobUuid, ct);
             await ops.PublishFleetSnapshotAsync(new
             {
                 type = "ops.fleet.snapshot",

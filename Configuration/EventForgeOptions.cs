@@ -10,6 +10,8 @@ public sealed class EventForgeOptions
     public string IngressQueueUrl { get; set; } = "";
     public string SqlitePath { get; set; } = "event-forge.db";
     public int EventRetentionDays { get; set; } = 7;
+    /// <summary>How long completed/failed jobs stay in the in-memory cache (SQLite retains longer).</summary>
+    public int JobCacheHours { get; set; } = 24;
     public int PingIntervalSeconds { get; set; } = 30;
     public int LeaseSeconds { get; set; } = 900;
     public int FlushIntervalSeconds { get; set; } = 3;

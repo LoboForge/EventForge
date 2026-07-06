@@ -118,9 +118,11 @@ public sealed class JobService
     }
 
     /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).</summary>
-    public bool ExtendLeaseOnCheckIn(string workerId, string? jobUuid)
+    public async Task<bool> ExtendLeaseOnCheckInAsync(string workerId, string? jobUuid, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(workerId) || string.IsNullOrWhiteSpace(jobUuid)) return false;
+        var job = await _persist.TryGetJobAsync(jobUuid.Trim(), ct);
+        if (job == null || !string.Equals(job.WorkerId, workerId, StringComparison.OrdinalIgnoreCase)) return false;
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
         return _queue.TryExtendLease(jobUuid.Trim(), workerId, lease);
     }
@@ -153,7 +155,7 @@ public sealed class JobService
 
     public async Task<bool> ReleaseAsync(string jobId, string workerId, CancellationToken ct)
     {
-        var job = _queue.Get(jobId);
+        var job = await _persist.TryGetJobAsync(jobId, ct);
         if (job == null || job.WorkerId != workerId) return false;
 
         var ok = _queue.TryRelease(jobId, workerId);
@@ -218,7 +220,7 @@ public sealed class JobService
 
     public async Task<bool> PushStreamTokenAsync(string jobId, string workerId, string delta, CancellationToken ct)
     {
-        var job = _queue.Get(jobId);
+        var job = await _persist.TryGetJobAsync(jobId, ct);
         if (job == null || job.WorkerId != workerId) return false;
         if (job.Kind != JobKind.TextStream) return false;
 
@@ -268,7 +270,7 @@ public sealed class JobService
     public async Task<bool> SaveOutputStreamAsync(
         string jobId, string workerId, string fileName, string contentType, Stream body, CancellationToken ct)
     {
-        var job = _queue.Get(jobId);
+        var job = await _persist.TryGetJobAsync(jobId, ct);
         if (job == null || job.WorkerId != workerId) return false;
 
         await using var buffer = new MemoryStream();
@@ -285,7 +287,7 @@ public sealed class JobService
 
     public async Task<JobRecord?> CompleteAsync(string jobId, string workerId, string? textReply, CancellationToken ct)
     {
-        var job = _queue.Get(jobId);
+        var job = await _persist.TryGetJobAsync(jobId, ct);
         if (job == null || job.WorkerId != workerId) return null;
 
         if (!string.IsNullOrWhiteSpace(textReply))
@@ -341,7 +343,7 @@ public sealed class JobService
 
     public async Task<JobRecord?> FailAsync(string jobId, string workerId, string error, CancellationToken ct)
     {
-        var job = _queue.Get(jobId);
+        var job = await _persist.TryGetJobAsync(jobId, ct);
         if (job == null || job.WorkerId != workerId) return null;
 
         job.Status = JobStatus.Failed;
