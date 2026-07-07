@@ -1,12 +1,12 @@
 version: 0.2
 
-# EventForge standalone — push main → CodeBuild → ECR loboforge:eventforge-latest → ECS eventforge
+# EventForge standalone — push main → CodeBuild → ECR eventforge:latest → ECS eventforge
 
 env:
   variables:
     DOCKER_BUILDKIT: "1"
-    IMAGE_REPO_NAME: "loboforge"
-    IMAGE_TAG: "eventforge-latest"
+    IMAGE_REPO_NAME: "eventforge"
+    IMAGE_TAG: "latest"
     CONTAINER_NAME: "eventforge"
     ECS_CLUSTER_NAME: "loboforge"
     ECS_SERVICE_NAME: "eventforge"
@@ -29,11 +29,11 @@ phases:
   build:
     commands:
       - docker build -f Dockerfile --build-arg BUILDKIT_INLINE_CACHE=1 -t $IMAGE_URI .
-      - docker tag $IMAGE_URI $REPOSITORY_URI:eventforge-$COMMIT_HASH
+      - docker tag $IMAGE_URI $REPOSITORY_URI:$COMMIT_HASH
   post_build:
     commands:
       - docker push $IMAGE_URI
-      - docker push $REPOSITORY_URI:eventforge-$COMMIT_HASH
+      - docker push $REPOSITORY_URI:$COMMIT_HASH
       - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$IMAGE_URI" > imagedefinitions.json
       - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --force-new-deployment --region $AWS_DEFAULT_REGION
       - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region $AWS_DEFAULT_REGION
