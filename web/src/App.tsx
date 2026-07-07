@@ -1,5 +1,6 @@
 import { LandingPage } from './LandingPage'
 import OpsApp from './OpsApp'
+import DashboardApp from './DashboardApp'
 import { Route } from './router'
 
 export default function App() {
@@ -10,6 +11,9 @@ export default function App() {
       </Route>
       <Route path="/ops">
         <OpsApp />
+      </Route>
+      <Route path="/dashboard">
+        <DashboardApp />
       </Route>
     </>
   )

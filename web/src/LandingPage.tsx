@@ -48,6 +48,7 @@ export function LandingPage() {
             <a href="#features">Features</a>
             <a href="#how-it-works">How it works</a>
             <a href="/ai-context/eventforge-context.md">Integration</a>
+            <Link to="/dashboard">Dashboard</Link>
             <Link to="/ops" className="landing-nav-cta">Ops console</Link>
           </nav>
         </div>

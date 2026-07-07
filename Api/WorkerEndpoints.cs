@@ -16,6 +16,7 @@ public static class WorkerEndpoints
             JobService jobs,
             InMemoryJobQueue queue,
             OpsEventHub ops,
+            ConsumerAppRegistry apps,
             IWorkerKeyValidator auth,
             CancellationToken ct) =>
         {
@@ -31,7 +32,7 @@ public static class WorkerEndpoints
             await ops.PublishFleetSnapshotAsync(new
             {
                 type = "ops.fleet.snapshot",
-                snapshot = OpsEndpoints.BuildSnapshot(fleet, queue),
+                snapshot = OpsEndpoints.BuildSnapshot(fleet, queue, apps),
             }, ct);
 
             return Results.Ok(new

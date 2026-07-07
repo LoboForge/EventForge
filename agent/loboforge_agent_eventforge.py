@@ -537,7 +537,7 @@ async def run_ef_agent(args: argparse.Namespace) -> None:
     except ImportError:
         start_sqs_background_provision = None  # type: ignore[misc, assignment]
 
-    http_timeout = aiohttp.ClientTimeout(total=120)
+    http_timeout = aiohttp.ClientTimeout(total=600, sock_read=600)
     prov_task = await start_sqs_background_provision(args, agent_state) if start_sqs_background_provision else None
     async with aiohttp.ClientSession(timeout=http_timeout) as http:
         if not await ef_api_check_in_once(http, args, agent_state, ef_base, worker_key):

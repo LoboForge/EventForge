@@ -39,6 +39,8 @@ builder.Services.AddSingleton<ISqliteS3Persistence, SqliteS3Persistence>();
 builder.Services.AddSingleton<IArtifactStore, ArtifactStore>();
 builder.Services.AddSingleton<WorkerFleetTracker>();
 builder.Services.AddSingleton<OpsEventHub>();
+builder.Services.AddSingleton<ConsumerAppRegistry>();
+builder.Services.AddSingleton<OpsMetricsHistory>();
 builder.Services.AddSingleton<JobService>();
 builder.Services.AddHostedService<LeaseMonitorService>();
 builder.Services.AddSingleton<WsConnectionManager>();
@@ -72,6 +74,7 @@ app.Urls.Add(listenUrl);
 app.MapHealthEndpoints();
 app.MapAgentEndpoints();
 app.MapJobEndpoints();
+app.MapConsumerEndpoints();
 app.MapFleetEndpoints();
 app.MapWorkerEndpoints();
 app.MapOpsEndpoints();
@@ -149,6 +152,7 @@ app.Map("/v1/ops/ws", async (HttpContext ctx) =>
     var opsHub = ctx.RequestServices.GetRequiredService<OpsEventHub>();
     var fleet = ctx.RequestServices.GetRequiredService<WorkerFleetTracker>();
     var queue = ctx.RequestServices.GetRequiredService<InMemoryJobQueue>();
+    var apps = ctx.RequestServices.GetRequiredService<ConsumerAppRegistry>();
     var session = new OpsSession(socket);
     opsHub.Add(session);
 
@@ -156,7 +160,7 @@ app.Map("/v1/ops/ws", async (HttpContext ctx) =>
     await opsHub.PublishFleetSnapshotAsync(new
     {
         type = "ops.fleet.snapshot",
-        snapshot = OpsEndpoints.BuildSnapshot(fleet, queue),
+        snapshot = OpsEndpoints.BuildSnapshot(fleet, queue, apps),
     }, ctx.RequestAborted);
 
     var buffer = new byte[8192];

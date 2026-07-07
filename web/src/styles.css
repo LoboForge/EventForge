@@ -115,3 +115,76 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   background: #0a0e12; border: 1px solid #243041; border-radius: 8px; padding: 12px;
   overflow-x: auto; font-size: .78rem; white-space: pre-wrap; word-break: break-all;
 }
+
+/* Dashboard + ops charts */
+.dashboard-app, .ops-app { max-width: 1600px; }
+.dashboard-stats .stat.highlight { border-color: #3d6db3; background: #121a28; }
+.dashboard-grid, .overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.chart-card h2, .chart-card .card-sub { margin-top: 0; }
+.chart-card.wide { grid-column: 1 / -1; }
+.line-chart, .bar-chart, .donut-chart { margin-top: 8px; }
+.chart-empty { padding: 24px; text-align: center; font-size: .9rem; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; font-size: .75rem; color: #8fa0b8; }
+.chart-legend.vertical { flex-direction: column; gap: 4px; }
+.chart-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.chart-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.bar-row { display: grid; grid-template-columns: 90px 1fr 40px; gap: 8px; align-items: center; margin-bottom: 6px; font-size: .85rem; }
+.bar-track { background: #1f2a38; border-radius: 4px; height: 8px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; min-width: 2px; }
+.donut-chart { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.summary-dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; font-size: .92rem; }
+.summary-dl dt { color: #8fa0b8; }
+.summary-dl dd { margin: 0; font-weight: 600; }
+.warn-text { color: #ffcc80; }
+.banner { margin-bottom: 16px; }
+.btn.small { padding: 4px 10px; font-size: .78rem; }
+.badge.paused { background: #4a3218; color: #ffcc80; }
+.badge.job-status.queued { background: #4a3a18; color: #ffcc80; }
+.badge.job-status.leased, .badge.job-status.streaming { background: #18304a; color: #7eb8ff; }
+.badge.job-status.completed { background: #183824; color: #9be7b0; }
+.badge.job-status.failed { background: #3a1a1a; color: #ff9a9a; }
+.error.inline { display: inline; background: none; border: none; padding: 0; margin-left: 8px; font-size: .8rem; }
+.muted-foot { font-size: .88rem; }
+.actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+.small { font-size: .78rem; }
+
+/* Ops professional header */
+.ops-header {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;
+  padding: 16px 0 20px; border-bottom: 1px solid #1f2a38; margin-bottom: 16px;
+}
+.ops-header-left { display: flex; gap: 14px; align-items: center; }
+.ops-header-left h1 { margin: 0; font-size: 1.5rem; }
+.ops-logo-mark {
+  width: 44px; height: 44px; border-radius: 10px;
+  background: linear-gradient(135deg, #2d5ea8, #3d7fd4);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: .95rem; letter-spacing: .04em;
+}
+.ops-header-actions { align-items: center; }
+.ops-live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #4caf82;
+  box-shadow: 0 0 8px #4caf82; animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+.ops-updated { font-size: .85rem; }
+.ops-kpi .stat.kpi { border-color: #243041; }
+.ops-kpi .stat.warn .value { color: #ffcc80; }
+.ops-tabs { border-bottom: 1px solid #1f2a38; padding-bottom: 8px; }
+.ops-login { max-width: 480px; }
+.ops-login-brand { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
+.compact-stats { margin-bottom: 16px; }
+.badge-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.badge.contrib { font-size: .68rem; padding: 2px 6px; }
+.badge.contrib.stale { background: #3a1a1a; color: #ff9a9a; }
+.badge.contrib.queue-blocked { background: #3a2a1a; color: #ffcc80; }
+.badge.contrib.comfy-down { background: #3a1a2a; color: #ff9acc; }
+.badge.contrib.no-claim-ready { background: #2a2a18; color: #e8d080; }
+.badge.contrib.idle-no-jobs { background: #1a2838; color: #8fa0b8; }
+.badge.contrib.busy-no-job-id { background: #3a2818; color: #ffb080; }
+.fleet-row.has-issues { background: rgba(240, 165, 0, 0.04); }

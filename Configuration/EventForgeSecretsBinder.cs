@@ -13,8 +13,9 @@ public static class EventForgeSecretsBinder
         var apiKey = cfg["ApiKey"];
         var workerKey = cfg["WorkerKey"];
         var opsKey = cfg["OpsKey"];
+        var appId = FirstNonEmpty(cfg["AppId"], "loboforge");
         if (!string.IsNullOrWhiteSpace(apiKey))
-            opts.ApiKeys[apiKey.Trim()] = "loboforge";
+            opts.ApiKeys[apiKey.Trim()] = appId;
         if (!string.IsNullOrWhiteSpace(workerKey))
             opts.WorkerKeys[workerKey.Trim()] = "wrath";
         if (!string.IsNullOrWhiteSpace(opsKey))

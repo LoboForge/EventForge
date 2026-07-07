@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from 'react'
 import {
+  badgeLabel,
   formatDiskGb,
   formatVram,
   isGenFleetWorker,
@@ -7,7 +8,20 @@ import {
   workerFleetRowKey,
 } from './api'
 
-type FleetFilter = 'all' | 'gen' | 'busy' | 'stale'
+type FleetFilter = 'all' | 'gen' | 'busy' | 'stale' | 'issues'
+
+function WorkerBadges({ badges }: { badges: string[] }) {
+  if (!badges.length) return <span className="badge idle">contributing</span>
+  return (
+    <div className="badge-row">
+      {badges.map((b) => (
+        <span key={b} className={'badge contrib ' + b.replace(/[^a-z0-9-]/gi, '')} title={b}>
+          {badgeLabel(b)}
+        </span>
+      ))}
+    </div>
+  )
+}
 
 function TagList({ items, empty = '—' }: { items: string[]; empty?: string }) {
   if (!items.length) return <span className="muted">{empty}</span>
@@ -93,6 +107,7 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
     if (filter === 'gen') rows = rows.filter(isGenFleetWorker)
     else if (filter === 'busy') rows = rows.filter((w) => w.state === 'busy')
     else if (filter === 'stale') rows = rows.filter((w) => w.checkInStale)
+    else if (filter === 'issues') rows = rows.filter((w) => w.badges.length > 0)
     const q = search.trim().toLowerCase()
     if (q) {
       rows = rows.filter((w) =>
@@ -127,6 +142,7 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
             <option value="gen">Gen fleet only ({genCount})</option>
             <option value="busy">Busy only</option>
             <option value="stale">Stale only</option>
+            <option value="issues">Non-contributing</option>
           </select>
         </div>
       </div>
@@ -143,6 +159,7 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
                 <th>VRAM</th>
                 <th>Disk</th>
                 <th>State</th>
+                <th>Badges</th>
                 <th>Jobs</th>
                 <th>Capabilities</th>
                 <th>LoRAs</th>
@@ -171,6 +188,7 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
                           {w.checkInStale ? 'stale' : w.state}
                         </span>
                       </td>
+                      <td><WorkerBadges badges={w.badges} /></td>
                       <td>
                         <span title="claimed / completed / failed">{w.jobsClaimed} / {w.jobsCompleted} / {w.jobsFailed}</span>
                       </td>
@@ -189,7 +207,7 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
                     </tr>
                     {open && (
                       <tr className="fleet-detail-row">
-                        <td colSpan={12}><WorkerDetail w={w} /></td>
+                        <td colSpan={13}><WorkerDetail w={w} /></td>
                       </tr>
                     )}
                   </Fragment>

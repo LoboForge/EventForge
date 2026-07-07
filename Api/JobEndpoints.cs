@@ -10,10 +10,22 @@ public static class JobEndpoints
 {
     public static void MapJobEndpoints(this WebApplication app)
     {
-        app.MapPost("/v1/jobs", async (HttpContext ctx, JobService jobs, IApiKeyValidator auth, CancellationToken ct) =>
+        app.MapPost("/v1/jobs", async (HttpContext ctx, JobService jobs, IApiKeyValidator auth, ConsumerAppRegistry apps, CancellationToken ct) =>
         {
             if (!AuthHelpers.TryReadApiKey(ctx, out var token) || !auth.TryValidate(token, out var appId))
                 return Results.Unauthorized();
+
+            if (apps.IsPaused(appId))
+            {
+                var state = apps.Get(appId);
+                return Results.Json(new
+                {
+                    error = "app_paused",
+                    message = "Job enqueue paused — generation quota exhausted or billing hold.",
+                    pause_reason = state?.PauseReason,
+                    paused_at = state?.PausedAtUtc?.ToString("O"),
+                }, statusCode: StatusCodes.Status402PaymentRequired);
+            }
 
             using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
             var root = doc.RootElement;

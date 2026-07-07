@@ -1,5 +1,6 @@
 using EventForge.Auth;
 using EventForge.Core;
+using EventForge.Infrastructure;
 using EventForge.Queue;
 using EventForge.Services;
 using EventForge.WebSocket;
@@ -14,11 +15,15 @@ public static class OpsEndpoints
             HttpContext ctx,
             WorkerFleetTracker fleet,
             InMemoryJobQueue queue,
+            ConsumerAppRegistry apps,
+            OpsMetricsHistory history,
             IOpsKeyValidator opsAuth) =>
         {
             if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
                 return Results.Unauthorized();
-            return Results.Ok(BuildSnapshot(fleet, queue));
+            var snap = BuildSnapshot(fleet, queue, apps);
+            RecordMetrics(history, fleet, queue);
+            return Results.Ok(snap);
         });
 
         app.MapGet("/v1/ops/fleet", (
@@ -113,6 +118,28 @@ public static class OpsEndpoints
             });
         });
 
+        app.MapPost("/v1/ops/jobs/{jobId}/cancel", async (
+            HttpContext ctx,
+            string jobId,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancelJobBody? body,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            var result = await jobs.CancelJobAsync(
+                jobId, body?.IncludeInFlight == true, body?.DeleteArtifacts == true, ct);
+            if (result == null) return Results.NotFound();
+            return Results.Ok(new
+            {
+                job_id = result.Value.Job.JobId,
+                app_id = result.Value.Job.AppId,
+                status = result.Value.Job.Status,
+                cancelled = result.Value.Removed,
+            });
+        });
+
         app.MapGet("/v1/ops/workers/{workerId}", (
             HttpContext ctx,
             string workerId,
@@ -132,11 +159,110 @@ public static class OpsEndpoints
                 .ToList();
             return Results.Ok(new { worker, active_jobs = activeJobs });
         });
+
+        app.MapGet("/v1/ops/metrics/history", (
+            HttpContext ctx,
+            OpsMetricsHistory history,
+            IOpsKeyValidator opsAuth,
+            int limit = 60) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            return Results.Ok(new { samples = history.GetRecent(Math.Clamp(limit, 1, 120)) });
+        });
+
+        app.MapGet("/v1/ops/apps", (
+            HttpContext ctx,
+            ConsumerAppRegistry apps,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            var allJobs = queue.SnapshotJobs();
+            var knownApps = allJobs.Select(j => j.AppId).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var id in knownApps)
+            {
+                if (apps.Get(id) == null && !apps.IsPaused(id))
+                    continue;
+            }
+            var rows = knownApps.Select(appId =>
+            {
+                var jobs = allJobs.Where(j => string.Equals(j.AppId, appId, StringComparison.OrdinalIgnoreCase)).ToList();
+                var state = apps.Get(appId);
+                return new
+                {
+                    app_id = appId,
+                    paused = apps.IsPaused(appId),
+                    pause_reason = state?.PauseReason,
+                    paused_at = state?.PausedAtUtc?.ToString("O"),
+                    jobs_queued = jobs.Count(j => j.Status == JobStatus.Queued),
+                    jobs_in_progress = jobs.Count(j => j.Status is JobStatus.Leased or JobStatus.Streaming),
+                    jobs_failed = jobs.Count(j => j.Status == JobStatus.Failed),
+                    jobs_completed = jobs.Count(j => j.Status == JobStatus.Completed),
+                };
+            }).OrderBy(r => r.app_id).ToList();
+            return Results.Ok(new { apps = rows });
+        });
+
+        app.MapPost("/v1/ops/apps/{appId}/pause", (
+            HttpContext ctx,
+            string appId,
+            PauseAppBody? body,
+            ConsumerAppRegistry apps,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(appId))
+                return Results.BadRequest(new { error = "app_id required" });
+            var state = apps.Pause(appId, body?.Reason ?? "generations_exhausted", body?.PausedBy ?? "ops");
+            return Results.Ok(new
+            {
+                app_id = state.AppId,
+                paused = state.Paused,
+                pause_reason = state.PauseReason,
+                paused_at = state.PausedAtUtc?.ToString("O"),
+            });
+        });
+
+        app.MapPost("/v1/ops/apps/{appId}/unpause", (
+            HttpContext ctx,
+            string appId,
+            ConsumerAppRegistry apps,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            var state = apps.Unpause(appId);
+            return state == null
+                ? Results.NotFound()
+                : Results.Ok(new { app_id = state.AppId, paused = false, unpaused_at = state.UnpausedAtUtc?.ToString("O") });
+        });
     }
 
-    internal static object BuildSnapshot(WorkerFleetTracker fleet, InMemoryJobQueue queue)
+    private static void RecordMetrics(OpsMetricsHistory history, WorkerFleetTracker fleet, InMemoryJobQueue queue)
     {
         var fleetSnap = fleet.Snapshot();
+        var jobs = queue.SnapshotJobs();
+        var workers = fleetSnap.Workers;
+        history.Record(new MetricsSample
+        {
+            AtUtc = DateTimeOffset.UtcNow,
+            JobsQueued = jobs.Count(j => j.Status == JobStatus.Queued),
+            JobsInProgress = jobs.Count(j => j.Status is JobStatus.Leased or JobStatus.Streaming),
+            JobsFailed = jobs.Count(j => j.Status == JobStatus.Failed),
+            WorkersTotal = workers.Count,
+            WorkersBusy = fleetSnap.BusyCount,
+            WorkersStale = fleetSnap.StaleCount,
+            WorkersNonContributing = workers.Count(w => WorkerContribution.IsNonContributing(w)),
+        });
+    }
+
+    internal static object BuildSnapshot(WorkerFleetTracker fleet, InMemoryJobQueue queue, ConsumerAppRegistry? apps = null)
+    {
+        var fleetSnap = fleet.Snapshot();
+        var jobs = queue.SnapshotJobs();
         return new
         {
             generated_at = DateTimeOffset.UtcNow.ToString("O"),
@@ -146,9 +272,23 @@ public static class OpsEndpoints
                 workers_busy = fleetSnap.BusyCount,
                 workers_idle = fleetSnap.IdleCount,
                 workers_stale = fleetSnap.StaleCount,
-                workers = fleetSnap.Workers,
+                workers_non_contributing = fleetSnap.Workers.Count(w => WorkerContribution.IsNonContributing(w)),
+                workers = fleetSnap.Workers.Select(w => EnrichWorker(w)).ToList(),
             },
             queue = BuildQueueStats(queue),
+            queue_by_app = jobs
+                .GroupBy(j => j.AppId, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new
+                {
+                    app_id = g.Key,
+                    paused = apps?.IsPaused(g.Key) ?? false,
+                    queued = g.Count(j => j.Status == JobStatus.Queued),
+                    in_progress = g.Count(j => j.Status is JobStatus.Leased or JobStatus.Streaming),
+                    failed = g.Count(j => j.Status == JobStatus.Failed),
+                    completed = g.Count(j => j.Status == JobStatus.Completed),
+                })
+                .OrderByDescending(x => x.queued)
+                .ToList(),
             active_jobs = queue.SnapshotJobs()
                 .Where(j => j.Status is JobStatus.Leased or JobStatus.Streaming)
                 .OrderByDescending(j => j.LeasedUntil)
@@ -161,6 +301,45 @@ public static class OpsEndpoints
                 .Take(25)
                 .Select(ToJobDto)
                 .ToList(),
+        };
+    }
+
+    private static object EnrichWorker(WorkerSnapshot w)
+    {
+        var badges = WorkerContribution.Badges(w);
+        return new
+        {
+            w.WorkerId,
+            w.NodeUuid,
+            w.Hostname,
+            w.GpuName,
+            w.VramTotalMb,
+            w.VramFreeMb,
+            w.DiskFreeMb,
+            w.Capability,
+            w.Tier,
+            w.Transport,
+            w.FleetMode,
+            w.ComfyOk,
+            w.QueueAccessOk,
+            w.QueueAccessError,
+            w.Busy,
+            w.CurrentJobUuid,
+            w.Capabilities,
+            w.ClaimReadyCapabilities,
+            w.KnownLoras,
+            w.ModelsJson,
+            w.State,
+            w.ActiveJobId,
+            w.JobsClaimed,
+            w.JobsCompleted,
+            w.JobsFailed,
+            w.JobsTimedOut,
+            w.JobsReleased,
+            w.LastSeenAt,
+            w.CheckInStale,
+            contributing = badges.Count == 0,
+            badges,
         };
     }
 
@@ -217,4 +396,10 @@ public sealed class PurgeQueuedRequest
     public string? Capability { get; set; }
     public bool IncludeInFlight { get; set; } = true;
     public bool DeleteS3 { get; set; } = true;
+}
+
+public sealed class PauseAppBody
+{
+    public string? Reason { get; set; }
+    public string? PausedBy { get; set; }
 }

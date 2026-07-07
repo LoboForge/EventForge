@@ -22,6 +22,7 @@ public sealed class JobService
     private readonly WriteBehindPersistence _persist;
     private readonly WorkerFleetTracker _fleet;
     private readonly OpsEventHub _ops;
+    private readonly ConsumerAppRegistry _apps;
     private readonly ILogger<JobService> _log;
     private readonly Dictionary<string, StringBuilder> _streamBuffers = new(StringComparer.OrdinalIgnoreCase);
 
@@ -34,6 +35,7 @@ public sealed class JobService
         WriteBehindPersistence persist,
         WorkerFleetTracker fleet,
         OpsEventHub ops,
+        ConsumerAppRegistry apps,
         ILogger<JobService> log)
     {
         _opts = options.Value;
@@ -44,6 +46,7 @@ public sealed class JobService
         _persist = persist;
         _fleet = fleet;
         _ops = ops;
+        _apps = apps;
         _log = log;
     }
 
@@ -82,7 +85,7 @@ public sealed class JobService
             return Task.FromResult<JobRecord?>(null);
 
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
-        var canClaim = BuildModelGate(workerHostname);
+        var canClaim = BuildCanClaimPredicate(workerHostname);
         var job = _queue.TryClaim(capability, tier, workerId, workerHostname, lease, canClaim);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
     }
@@ -99,9 +102,15 @@ public sealed class JobService
             return Task.FromResult<JobRecord?>(null);
 
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
-        var canClaim = BuildModelGate(workerHostname);
+        var canClaim = BuildCanClaimPredicate(workerHostname);
         var job = _queue.TryClaimAny(readyCaps, workerId, workerHostname, lease, canClaim);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
+    }
+
+    private Func<JobRecord, bool> BuildCanClaimPredicate(string? workerHostname)
+    {
+        var modelGate = BuildModelGate(workerHostname);
+        return job => !_apps.IsPaused(job.AppId) && modelGate(job);
     }
 
     private Func<JobRecord, bool> BuildModelGate(string? workerHostname)
@@ -235,6 +244,103 @@ public sealed class JobService
             await _persist.DeleteJobsAsync(ids, ct);
         _persist.MarkDirty();
         return (removed.Count, ids);
+    }
+
+    public Task<JobRecord?> GetJobForAppAsync(string jobId, string appId, CancellationToken ct) =>
+        GetJobOwnedByAppAsync(jobId, appId, ct);
+
+    public async Task<(int Removed, List<string> Ids)> CancelQueuedForAppAsync(
+        string appId,
+        string? capability,
+        bool deleteArtifacts,
+        CancellationToken ct) =>
+        await PurgeQueuedForAppAsync(appId, capability, includeInFlight: false, deleteS3: deleteArtifacts, ct);
+
+    public async Task<(JobRecord Job, bool Removed)?> CancelJobForAppAsync(
+        string jobId,
+        string appId,
+        bool includeInFlight,
+        bool deleteArtifacts,
+        CancellationToken ct)
+    {
+        var job = await GetJobOwnedByAppAsync(jobId, appId, ct);
+        if (job == null) return null;
+
+        if (job.Status == JobStatus.Queued)
+        {
+            var removed = _queue.RemoveWhere(j => string.Equals(j.JobId, job.JobId, StringComparison.OrdinalIgnoreCase));
+            if (removed.Count == 0) return null;
+            if (deleteArtifacts)
+                await _artifacts.DeleteJobArtifactsBatchAsync([job.JobId], ct);
+            await _persist.DeleteJobsAsync([job.JobId], ct);
+            _persist.MarkDirty();
+            _log.LogInformation("Consumer cancelled queued job {Job} app={App}", job.JobId, appId);
+            return (removed[0], true);
+        }
+
+        if (job.Status is JobStatus.Leased or JobStatus.Streaming && includeInFlight)
+        {
+            job.Status = JobStatus.Failed;
+            job.Error = "cancelled_by_consumer";
+            job.CompletedAt = DateTimeOffset.UtcNow;
+            _queue.TryUpdate(job);
+            _persist.MarkDirty();
+            _fleet.OnFail(job.WorkerId, job.WorkerHostname);
+            await EmitLifecycleEventAsync(job, ForgeEventTypes.Failed, "failed", job.WorkerHostname, job.Error, ct);
+            await PublishOpsJobEventAsync("ops.job.cancelled", job, ct);
+            _log.LogInformation("Consumer cancelled in-flight job {Job} app={App}", job.JobId, appId);
+            return (job, false);
+        }
+
+        return null;
+    }
+
+    public async Task<(JobRecord Job, bool Removed)?> CancelJobAsync(
+        string jobId,
+        bool includeInFlight,
+        bool deleteArtifacts,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(jobId)) return null;
+        var job = await _persist.TryGetJobAsync(jobId.Trim(), ct);
+        if (job == null) return null;
+
+        if (job.Status == JobStatus.Queued)
+        {
+            var removed = _queue.RemoveWhere(j => string.Equals(j.JobId, job.JobId, StringComparison.OrdinalIgnoreCase));
+            if (removed.Count == 0) return null;
+            if (deleteArtifacts)
+                await _artifacts.DeleteJobArtifactsBatchAsync([job.JobId], ct);
+            await _persist.DeleteJobsAsync([job.JobId], ct);
+            _persist.MarkDirty();
+            _log.LogInformation("Ops cancelled queued job {Job} app={App}", job.JobId, job.AppId);
+            return (removed[0], true);
+        }
+
+        if (job.Status is JobStatus.Leased or JobStatus.Streaming && includeInFlight)
+        {
+            job.Status = JobStatus.Failed;
+            job.Error = "cancelled_by_ops";
+            job.CompletedAt = DateTimeOffset.UtcNow;
+            _queue.TryUpdate(job);
+            _persist.MarkDirty();
+            _fleet.OnFail(job.WorkerId, job.WorkerHostname);
+            await EmitLifecycleEventAsync(job, ForgeEventTypes.Failed, "failed", job.WorkerHostname, job.Error, ct);
+            await PublishOpsJobEventAsync("ops.job.cancelled", job, ct);
+            _log.LogInformation("Ops cancelled in-flight job {Job} app={App}", job.JobId, job.AppId);
+            return (job, false);
+        }
+
+        return null;
+    }
+
+    private async Task<JobRecord?> GetJobOwnedByAppAsync(string jobId, string appId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(jobId) || string.IsNullOrWhiteSpace(appId)) return null;
+        var job = await _persist.TryGetJobAsync(jobId.Trim(), ct);
+        if (job == null || !string.Equals(job.AppId, appId.Trim(), StringComparison.OrdinalIgnoreCase))
+            return null;
+        return job;
     }
 
     public async Task<bool> PushStreamTokenAsync(string jobId, string workerId, string delta, CancellationToken ct)

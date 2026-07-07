@@ -75,6 +75,8 @@ export type WorkerRow = {
   jobsFailed: number
   jobsTimedOut: number
   jobsReleased: number
+  contributing?: boolean
+  badges: string[]
 }
 
 export type Snapshot = {
@@ -84,20 +86,48 @@ export type Snapshot = {
     workers_busy: number
     workers_idle: number
     workers_stale: number
+    workers_non_contributing?: number
     workers: Array<Record<string, unknown>>
   }
   queue: {
+    jobs_total?: number
     jobs_queued: number
     jobs_in_progress: number
     jobs_failed: number
+    jobs_completed?: number
     by_capability: { capability: string; queued: number; in_progress: number; failed: number }[]
+    by_tier?: { tier: string; queued: number }[]
   }
+  queue_by_app?: {
+    app_id: string
+    paused: boolean
+    queued: number
+    in_progress: number
+    failed: number
+    completed: number
+  }[]
   active_jobs: JobRow[]
   recent_failures: JobRow[]
 }
 
+export type OpsAppRow = {
+  app_id: string
+  paused: boolean
+  pause_reason?: string | null
+  paused_at?: string | null
+  jobs_queued: number
+  jobs_in_progress: number
+  jobs_failed: number
+  jobs_completed: number
+}
+
+export type MetricsHistoryResponse = {
+  samples: Record<string, unknown>[]
+}
+
 export type JobRow = {
   job_id: string
+  app_id?: string
   capability: string
   tier: string
   status: string
@@ -105,6 +135,8 @@ export type JobRow = {
   worker_id?: string | null
   error?: string | null
   leased_until?: string | null
+  created_at?: string | null
+  completed_at?: string | null
 }
 
 export function isGenFleetWorker(w: Pick<WorkerRow, 'hostname'>): boolean {
@@ -203,7 +235,22 @@ export function normalizeWorker(raw: Record<string, unknown>): WorkerRow {
     jobsFailed: readNum(raw, 'jobsFailed', 'jobs_failed'),
     jobsTimedOut: readNum(raw, 'jobsTimedOut', 'jobs_timed_out'),
     jobsReleased: readNum(raw, 'jobsReleased', 'jobs_released'),
+    contributing: typeof raw.contributing === 'boolean' ? raw.contributing : true,
+    badges: readStrList(raw, 'badges'),
   }
+}
+
+const BADGE_LABELS: Record<string, string> = {
+  stale: 'Stale',
+  'queue-blocked': 'Queue blocked',
+  'comfy-down': 'Comfy down',
+  'no-claim-ready': 'No claim-ready',
+  'idle-no-jobs': 'Idle (no jobs)',
+  'busy-no-job-id': 'Busy w/o job',
+}
+
+export function badgeLabel(badge: string): string {
+  return BADGE_LABELS[badge] ?? badge
 }
 
 export function formatDiskGb(mb: number): string {
