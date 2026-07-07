@@ -1,6 +1,16 @@
 # Deploy EventForge to production
 
-Standalone repo: push `main` → CodeBuild → ECR `eventforge` → ECS service `eventforge` (cluster `loboforge`, us-east-2).
+**Standalone repo only.** Push `main` → GitHub Actions → CodeBuild `eventforge_github` → ECR → ECS `eventforge`.
+
+| Item | Value |
+|------|--------|
+| ECR image | `994185520581.dkr.ecr.us-east-2.amazonaws.com/loboforge:eventforge-standalone-<commit>` |
+| Mutable pointer | `loboforge:eventforge-standalone-latest` |
+| ECS cluster / service | `loboforge` / `eventforge` |
+| Region | `us-east-2` |
+| Public URL | https://eventforge.loboforge.com |
+
+**Do not use** `loboforge:eventforge-latest` — the LoboForge.Studio monorepo still builds that tag from stale embedded `event-forge/` code. ECS task definitions must reference `eventforge-standalone-*` only.
 
 ## Pre-flight
 
@@ -11,15 +21,33 @@ cd web && npm ci && npm run build && cd ..
 
 Copy `secrets.example.json` → `secrets.local.json` for local fleet patch scripts (gitignored).
 
-## Deploy
+## Deploy (automatic)
 
-1. Push to `main` on this repository (wire CodeBuild project to this repo — see `buildspec.yml`).
-2. Or local image push + ECS roll:
+1. Push to `main` on **this** repository.
+2. GitHub Actions workflow `.github/workflows/deploy.yml` starts CodeBuild and waits for success.
+3. CodeBuild runs tests, builds Docker, pushes `eventforge-standalone-<sha>`, registers a new ECS task definition, and rolls the service.
+4. Health gate: `scripts/eventforge-deploy-health-gate.sh`
+
+Monitor: GitHub Actions on LoboForge/EventForge · CloudWatch `/aws/codebuild/eventforge_github`
+
+## Deploy (manual)
 
 ```bash
-docker build -t eventforge:local .
-# tag + push to 994185520581.dkr.ecr.us-east-2.amazonaws.com/eventforge:latest
-aws ecs update-service --cluster loboforge --service eventforge --force-new-deployment --region us-east-2
+aws codebuild start-build \
+  --project-name eventforge_github \
+  --source-version main \
+  --region us-east-2
+```
+
+Or after a local image build (requires Docker + ECR login):
+
+```bash
+COMMIT=$(git rev-parse --short HEAD)
+IMAGE=994185520581.dkr.ecr.us-east-2.amazonaws.com/loboforge:eventforge-standalone-$COMMIT
+docker build -t "$IMAGE" .
+docker push "$IMAGE"
+bash scripts/eventforge-ecs-deploy.sh "$IMAGE"
+bash scripts/eventforge-deploy-health-gate.sh https://eventforge.loboforge.com "$COMMIT"
 ```
 
 ## Verify
@@ -27,6 +55,17 @@ aws ecs update-service --cluster loboforge --service eventforge --force-new-depl
 ```bash
 curl -sf https://eventforge.loboforge.com/health
 curl -sf https://eventforge.loboforge.com/agent/provision_worker.sh | head -1
+bash scripts/eventforge-deploy-health-gate.sh
+```
+
+Check ECS is on a standalone image:
+
+```bash
+aws ecs describe-services --cluster loboforge --services eventforge --region us-east-2 \
+  --query 'services[0].taskDefinition' --output text | xargs -I{} \
+  aws ecs describe-task-definition --task-definition {} --region us-east-2 \
+  --query 'taskDefinition.containerDefinitions[?name==`eventforge`].image' --output text
+# Must contain eventforge-standalone-
 ```
 
 ## One-time infra
@@ -36,6 +75,8 @@ curl -sf https://eventforge.loboforge.com/agent/provision_worker.sh | head -1
 | `scripts/setup-eventforge-tunnel.sh` | Cloudflare tunnel + sidecar |
 | `scripts/bootstrap-eventforge-ecs.sh` | ECS task/service (desiredCount=1) |
 | `scripts/setup-eventforge-cloudmap.sh` | In-VPC DNS (optional) |
+| `scripts/eventforge-ecs-deploy.sh` | Register task def + roll service |
+| `scripts/eventforge-deploy-health-gate.sh` | Post-deploy smoke checks |
 
 DNS runbook: `docs/runbooks/eventforge-dns.md`
 
@@ -47,10 +88,14 @@ bash scripts/patch-vast-fleet-eventforge.sh
 
 Requires `secrets.local.json` with `EventForge.VastAi.ApiKey` and worker key, or env vars.
 
-## Critical constraint
+## Critical constraints
 
-**Single ECS task only** — in-memory job queue. Do not scale `desiredCount` beyond 1 until queue state is externalized.
+1. **Single ECS task only** — in-memory job queue. `desiredCount` must stay `1`.
+2. **No overlapping tasks during deploy** — service uses `minimumHealthyPercent=0`, `maximumPercent=100`, AZ rebalancing disabled.
+3. **Circuit breaker** — failed deploys roll back automatically.
+4. **Monorepo must not deploy EventForge** — LoboForge.Studio CI should skip ECS roll for `eventforge` service.
 
 ## LoboForge consumer
 
-LoboForge (separate repo) enqueues via `POST /v1/jobs` and listens on `WSS /v1/ws`. See `docs/QueueIntegration.md`.
+LoboForge enqueues via `POST /v1/jobs` and listens on `WSS /v1/ws`. See `docs/QueueIntegration.md`.
+

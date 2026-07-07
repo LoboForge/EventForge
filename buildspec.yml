@@ -1,7 +1,7 @@
 version: 0.2
 
-# EventForge standalone — push main → CodeBuild → ECR eventforge-standalone-latest → ECS eventforge
-# Tag is intentionally NOT eventforge-latest (LoboForge.Studio monorepo uses that from stale event-forge/).
+# EventForge standalone — push main → CodeBuild → ECR eventforge-standalone-* → ECS eventforge
+# NEVER use loboforge:eventforge-latest (LoboForge.Studio monorepo overwrites that tag).
 
 env:
   variables:
@@ -25,21 +25,21 @@ phases:
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
       - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-      - IMAGE_URI=$REPOSITORY_URI:$IMAGE_TAG
-      - echo "Building EventForge $IMAGE_URI (commit $COMMIT_HASH)"
+      - IMAGE_URI=$REPOSITORY_URI:eventforge-standalone-$COMMIT_HASH
+      - echo "Building EventForge $IMAGE_URI"
   build:
     commands:
       - docker build -f Dockerfile --build-arg BUILDKIT_INLINE_CACHE=1 -t $IMAGE_URI .
-      - docker tag $IMAGE_URI $REPOSITORY_URI:eventforge-standalone-$COMMIT_HASH
+      - docker tag $IMAGE_URI $REPOSITORY_URI:$IMAGE_TAG
   post_build:
     commands:
       - docker push $IMAGE_URI
-      - docker push $REPOSITORY_URI:eventforge-standalone-$COMMIT_HASH
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - chmod +x scripts/eventforge-ecs-deploy.sh scripts/eventforge-deploy-health-gate.sh
+      - bash scripts/eventforge-ecs-deploy.sh "$IMAGE_URI"
+      - bash scripts/eventforge-deploy-health-gate.sh https://eventforge.loboforge.com "$COMMIT_HASH"
       - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$IMAGE_URI" > imagedefinitions.json
-      - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --force-new-deployment --region $AWS_DEFAULT_REGION
-      - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region $AWS_DEFAULT_REGION
-      - curl -sf https://eventforge.loboforge.com/health || echo "WARN public health check failed"
-      - echo "EventForge deploy completed $(date)"
+      - echo "EventForge deploy completed $(date) commit=$COMMIT_HASH"
 
 artifacts:
   files:

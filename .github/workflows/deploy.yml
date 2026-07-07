@@ -5,9 +5,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: eventforge-prod-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

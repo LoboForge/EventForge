@@ -8,8 +8,8 @@ ACCOUNT="${AWS_ACCOUNT_ID:-994185520581}"
 CLUSTER="loboforge"
 SERVICE="eventforge"
 FAMILY="eventforge"
-ECR_REPO="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/eventforge"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+ECR_REPO="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/loboforge"
+IMAGE_TAG="${IMAGE_TAG:-eventforge-standalone-latest}"
 SUBNET="${SUBNET:-subnet-04982efc4adf72e1e}"
 TASK_SG="${TASK_SG:-sg-08ad7b44cee5697e8}"
 EXEC_ROLE="arn:aws:iam::${ACCOUNT}:role/loboforge-ecs-execution"
@@ -30,8 +30,8 @@ aws logs create-log-group --log-group-name "$LOG_GROUP" --region "$REGION" 2>/de
 
 step "Login ECR + resolve image tag"
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com" 2>/dev/null || true
-if ! aws ecr describe-images --repository-name eventforge --image-ids imageTag=latest --region "$REGION" >/dev/null 2>&1; then
-  IMAGE_TAG=$(aws ecr describe-images --repository-name eventforge --region "$REGION" --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo latest)
+if ! aws ecr describe-images --repository-name loboforge --image-ids imageTag=eventforge-standalone-latest --region "$REGION" >/dev/null 2>&1; then
+  IMAGE_TAG=$(aws ecr describe-images --repository-name loboforge --region "$REGION" --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo latest)
 fi
 echo "  Using image ${ECR_REPO}:${IMAGE_TAG}"
 
@@ -147,7 +147,9 @@ if aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region
   --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q "$SERVICE"; then
   step "Updating existing ${SERVICE} service"
   aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$TASK_ARN" \
-    --desired-count 1 --force-new-deployment --region "$REGION" >/dev/null
+    --desired-count 1 --availability-zone-rebalancing DISABLED \
+    --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}" \
+    --force-new-deployment --region "$REGION" >/dev/null
 else
   step "Creating ${SERVICE} service (desiredCount=1)"
   aws ecs create-service \
@@ -156,6 +158,8 @@ else
     --task-definition "$TASK_ARN" \
     --desired-count 1 \
     --launch-type FARGATE \
+    --availability-zone-rebalancing DISABLED \
+    --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}" \
     --network-configuration "awsvpcConfiguration={subnets=[${SUBNET}],securityGroups=[${TASK_SG}],assignPublicIp=ENABLED}" \
     --region "$REGION" >/dev/null
 fi
