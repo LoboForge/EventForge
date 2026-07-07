@@ -24,8 +24,17 @@ jobs:
             --region us-east-2 \
             --query 'build.id' --output text)
           echo "Started CodeBuild: $BUILD_ID"
-          aws codebuild wait build-complete --ids "$BUILD_ID" --region us-east-2
-          STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region us-east-2 \
-            --query 'builds[0].buildStatus' --output text)
-          echo "Build status: $STATUS"
-          test "$STATUS" = "SUCCEEDED"
+          for i in $(seq 1 90); do
+            STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region us-east-2 \
+              --query 'builds[0].buildStatus' --output text)
+            PHASE=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region us-east-2 \
+              --query 'builds[0].currentPhase' --output text)
+            echo "[$i] $PHASE — $STATUS"
+            case "$STATUS" in
+              SUCCEEDED) exit 0 ;;
+              FAILED|FAULT|STOPPED|TIMED_OUT) exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "Timed out waiting for CodeBuild"
+          exit 1
