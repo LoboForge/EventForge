@@ -29,11 +29,26 @@ public static class AgentEndpoints
             "forge-queue-sdk.tar.gz",
         };
 
+    private static readonly HashSet<string> JoycaptionScripts =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "joycaption/joycaption_eventforge_worker.py",
+            "joycaption/joycaption_server.py",
+            "joycaption/joycaption_prompt.json",
+            "joycaption/joycaption_cli.py",
+            "joycaption/vast_joycaption_onstart.sh",
+            "joycaption/vast_joycaption_minimal_onstart.sh",
+            "joycaption/vast_joycaption_eventforge_worker.sh",
+            "joycaption/vast_joycaption_health.sh",
+            "joycaption/vast_joycaption_healthcheck.sh",
+            "joycaption/vast_joycaption_watchdog.sh",
+        };
+
     public static void MapAgentEndpoints(this WebApplication app)
     {
-        app.MapGet("/agent/{file}", (string file, IWebHostEnvironment env, IConfiguration cfg, ILoggerFactory loggerFactory) =>
+        app.MapGet("/agent/{*file}", (string file, IWebHostEnvironment env, IConfiguration cfg, ILoggerFactory loggerFactory) =>
         {
-            if (!AllowedScripts.Contains(file))
+            if (!AllowedScripts.Contains(file) && !JoycaptionScripts.Contains(file))
                 return Results.NotFound();
 
             var log = loggerFactory.CreateLogger("EventForge.AgentScripts");
@@ -49,7 +64,7 @@ public static class AgentEndpoints
             string? path = null;
             foreach (var dir in dirs.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var candidate = Path.Combine(dir, file);
+                var candidate = Path.Combine(dir, file.Replace('/', Path.DirectorySeparatorChar));
                 if (File.Exists(candidate))
                 {
                     path = candidate;
