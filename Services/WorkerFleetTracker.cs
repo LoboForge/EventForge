@@ -11,6 +11,7 @@ public sealed class WorkerFleetTracker
     public void RegisterCheckIn(string workerKey, WorkerCheckInPayload payload)
     {
         var fleetKey = ResolveFleetKey(workerKey, payload.NodeUuid, payload.Hostname);
+        RemoveDuplicateHostnameRows(fleetKey, payload.Hostname);
         var stats = GetOrAdd(fleetKey, payload.Hostname, workerKey);
         stats.NodeUuid = payload.NodeUuid ?? workerKey;
         stats.Hostname = NormalizeHostname(payload.Hostname, workerKey);
@@ -249,6 +250,21 @@ public sealed class WorkerFleetTracker
 
     private static string NormalizeHostname(string? hostname, string fallback) =>
         string.IsNullOrWhiteSpace(hostname) ? fallback : hostname.Trim();
+
+    private void RemoveDuplicateHostnameRows(string keepKey, string? hostname)
+    {
+        if (string.IsNullOrWhiteSpace(hostname)) return;
+        var host = hostname.Trim();
+        foreach (var key in _workers.Keys.ToList())
+        {
+            if (string.Equals(key, keepKey, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_workers.TryGetValue(key, out var stats)
+                && string.Equals(stats.Hostname, host, StringComparison.OrdinalIgnoreCase))
+            {
+                _workers.TryRemove(key, out _);
+            }
+        }
+    }
 
     private sealed class WorkerStats
     {

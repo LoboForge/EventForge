@@ -157,7 +157,7 @@ public static class WorkerBootstrapDefaults
         return sb.ToString();
     }
 
+    /// <summary>WorkerKeys map bearer token → worker id (see EventForgeSecretsBinder).</summary>
     private static string? ResolveFirstWorkerKey(EventForgeOptions opts) =>
-        opts.WorkerKeys.Values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))
-        ?? opts.WorkerKeys.Keys.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k));
+        opts.WorkerKeys.Keys.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k));
 }

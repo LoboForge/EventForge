@@ -206,6 +206,15 @@ if (Directory.Exists(wwwroot))
     {
         FileProvider = new PhysicalFileProvider(wwwroot),
         RequestPath = "",
+        OnPrepareResponse = ctx =>
+        {
+            // index.html must always revalidate so ops UI updates aren't stuck on old hashed bundles.
+            var path = ctx.File.Name;
+            if (path.Equals("index.html", StringComparison.OrdinalIgnoreCase))
+                ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+            else if (path.StartsWith("index-", StringComparison.Ordinal) && path.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+        },
     });
     app.MapFallbackToFile("index.html");
 }

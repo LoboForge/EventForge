@@ -109,6 +109,26 @@ public sealed class WorkerFleetTrackerTests
     }
 
     [Fact]
+    public void RegisterCheckIn_removes_stale_hostname_row_when_node_uuid_checkin_arrives()
+    {
+        var fleet = new WorkerFleetTracker();
+        fleet.OnClaim("wrath", "loboforge-image-111", "flux-klein", "normal", "job-abc");
+
+        fleet.RegisterCheckIn("wrath", new WorkerCheckInPayload
+        {
+            NodeUuid = "node-a",
+            Hostname = "loboforge-image-111",
+            Transport = "eventforge",
+            ForgeQueueCapabilities = ["flux-klein"],
+            ClaimReadyCapabilities = ["flux-klein"],
+        });
+
+        fleet.Snapshot().Workers.Should().HaveCount(1);
+        fleet.TryGetWorker("node-a")!.ClaimReadyCapabilities.Should().Contain("flux-klein");
+        fleet.TryGetWorker("loboforge-image-111").Should().BeNull();
+    }
+
+    [Fact]
     public void OnClaim_without_prior_checkin_keys_by_hostname()
     {
         var fleet = new WorkerFleetTracker();
