@@ -246,6 +246,60 @@ public sealed class JobService
         return (removed.Count, ids);
     }
 
+    /// <summary>Move queued (or in-flight) jobs between consumers without restart — updates in-memory queue + persistence flush.</summary>
+    public int ReassignConsumer(
+        string fromAppId,
+        string toAppId,
+        string? capability = null,
+        string? status = null,
+        bool orchestratorCaptionOnly = false)
+    {
+        var from = fromAppId.Trim();
+        var to = toAppId.Trim();
+        if (from.Length == 0 || to.Length == 0) return 0;
+
+        var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
+        var statusFilter = string.IsNullOrWhiteSpace(status) ? null : status.Trim();
+
+        var count = _queue.ReassignAppIdWhere(j =>
+        {
+            if (!string.Equals(j.AppId, from, StringComparison.OrdinalIgnoreCase)) return false;
+            if (cap != null && !string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase)) return false;
+            if (statusFilter != null && !string.Equals(j.Status, statusFilter, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (orchestratorCaptionOnly && !IsOrchestratorCaptionJob(j)) return false;
+            return true;
+        }, to);
+
+        if (count > 0)
+        {
+            _persist.MarkDirty();
+            _log.LogInformation(
+                "Reassigned {Count} job(s) from {From} to {To} cap={Cap} status={Status} orchestratorOnly={Orch}",
+                count, from, to, cap ?? "*", statusFilter ?? "*", orchestratorCaptionOnly);
+        }
+        return count;
+    }
+
+    static bool IsOrchestratorCaptionJob(JobRecord job)
+    {
+        if (!string.Equals(job.Capability, "caption", StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(job.PayloadJson);
+            if (!doc.RootElement.TryGetProperty("type", out var typeEl)
+                || typeEl.ValueKind != JsonValueKind.String
+                || !string.Equals(typeEl.GetString(), "assign_job", StringComparison.OrdinalIgnoreCase))
+                return false;
+            var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
+            return string.Equals(model, "joycaption", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public Task<JobRecord?> GetJobForAppAsync(string jobId, string appId, CancellationToken ct) =>
         GetJobOwnedByAppAsync(jobId, appId, ct);
 

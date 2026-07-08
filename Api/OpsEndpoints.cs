@@ -69,6 +69,41 @@ public static class OpsEndpoints
             return Results.Ok(new { count = jobs.Count, jobs });
         });
 
+        app.MapGet("/v1/ops/jobs/{jobId}", (
+            HttpContext ctx,
+            string jobId,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(jobId))
+                return Results.BadRequest(new { error = "job_id required" });
+
+            var job = queue.Get(jobId.Trim())
+                        ?? queue.SnapshotJobs()
+                            .FirstOrDefault(j => j.JobId.StartsWith(jobId.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (job == null)
+                return Results.NotFound(new { job_id = jobId.Trim(), status = "missing" });
+
+            var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
+            return Results.Ok(new
+            {
+                job_id = job.JobId,
+                status = job.Status.ToString().ToLowerInvariant(),
+                capability = job.Capability,
+                tier = job.Tier,
+                kind = job.Kind,
+                model,
+                worker_id = job.WorkerId,
+                hostname = job.WorkerHostname,
+                created_at = job.CreatedAt.ToString("O"),
+                leased_until = job.LeasedUntil?.ToString("O"),
+                completed_at = job.CompletedAt?.ToString("O"),
+                error = job.Error,
+            });
+        });
+
         app.MapGet("/v1/ops/failures", (
             HttpContext ctx,
             InMemoryJobQueue queue,
@@ -115,6 +150,35 @@ public static class OpsEndpoints
                 delete_s3 = body.DeleteS3,
                 include_in_flight = body.IncludeInFlight,
                 job_ids_sample = ids.Take(20).ToList(),
+            });
+        });
+
+        app.MapPost("/v1/ops/jobs/reassign-consumer", (
+            HttpContext ctx,
+            ReassignConsumerRequest body,
+            JobService jobs,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(body.FromAppId) || string.IsNullOrWhiteSpace(body.ToAppId))
+                return Results.BadRequest(new { error = "from_app_id and to_app_id required" });
+
+            var reassigned = jobs.ReassignConsumer(
+                body.FromAppId,
+                body.ToAppId,
+                body.Capability,
+                body.Status,
+                body.OrchestratorCaptionOnly);
+
+            return Results.Ok(new
+            {
+                from_app_id = body.FromAppId.Trim(),
+                to_app_id = body.ToAppId.Trim(),
+                capability = body.Capability,
+                status = body.Status ?? "queued",
+                orchestrator_caption_only = body.OrchestratorCaptionOnly,
+                reassigned,
             });
         });
 
@@ -396,6 +460,17 @@ public sealed class PurgeQueuedRequest
     public string? Capability { get; set; }
     public bool IncludeInFlight { get; set; } = true;
     public bool DeleteS3 { get; set; } = true;
+}
+
+public sealed class ReassignConsumerRequest
+{
+    public string FromAppId { get; set; } = "";
+    public string ToAppId { get; set; } = "";
+    public string? Capability { get; set; }
+    /// <summary>When set (e.g. queued), only jobs in this status are moved.</summary>
+    public string? Status { get; set; } = "queued";
+    /// <summary>Only JoyCaption Orchestrator assign_job payloads (excludes loboforge.com caption API jobs).</summary>
+    public bool OrchestratorCaptionOnly { get; set; } = true;
 }
 
 public sealed class PauseAppBody

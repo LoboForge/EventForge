@@ -232,6 +232,24 @@ public sealed class InMemoryJobQueue
         }
     }
 
+    /// <summary>Reassign matching jobs to a new consumer app id (in-memory only).</summary>
+    public int ReassignAppIdWhere(Func<JobRecord, bool> predicate, string newAppId)
+    {
+        var app = newAppId.Trim();
+        if (app.Length == 0) return 0;
+        lock (_lock)
+        {
+            var count = 0;
+            foreach (var id in _jobs.Keys.ToList())
+            {
+                if (!_jobs.TryGetValue(id, out var job) || !predicate(job)) continue;
+                _jobs[id] = CloneWithAppId(job, app);
+                count++;
+            }
+            return count;
+        }
+    }
+
     public IReadOnlyList<ExpiredLeaseInfo> RequeueExpired(DateTimeOffset now)
     {
         lock (_lock)
@@ -274,6 +292,27 @@ public sealed class InMemoryJobQueue
     {
         JobId = j.JobId,
         AppId = j.AppId,
+        Capability = j.Capability,
+        Tier = j.Tier,
+        QueuePriority = j.QueuePriority,
+        Kind = j.Kind,
+        PayloadJson = j.PayloadJson,
+        Status = j.Status,
+        WorkerId = j.WorkerId,
+        WorkerHostname = j.WorkerHostname,
+        CreatedAt = j.CreatedAt,
+        LeasedUntil = j.LeasedUntil,
+        CompletedAt = j.CompletedAt,
+        OutputUrl = j.OutputUrl,
+        OutputContentType = j.OutputContentType,
+        TextReply = j.TextReply,
+        Error = j.Error,
+    };
+
+    private static JobRecord CloneWithAppId(JobRecord j, string appId) => new()
+    {
+        JobId = j.JobId,
+        AppId = appId,
         Capability = j.Capability,
         Tier = j.Tier,
         QueuePriority = j.QueuePriority,
