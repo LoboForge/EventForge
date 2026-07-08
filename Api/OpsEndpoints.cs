@@ -129,6 +129,34 @@ public static class OpsEndpoints
             });
         });
 
+        app.MapPost("/v1/ops/jobs/retier", async (
+            HttpContext ctx,
+            RetierJobsRequest body,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(body.FromTier) || string.IsNullOrWhiteSpace(body.ToTier))
+                return Results.BadRequest(new { error = "from_tier and to_tier required" });
+
+            var retiered = await jobs.RetierQueuedAsync(
+                body.AppId,
+                body.Capability,
+                body.FromTier,
+                body.ToTier,
+                ct);
+
+            return Results.Ok(new
+            {
+                retiered,
+                from_tier = body.FromTier.Trim(),
+                to_tier = body.ToTier.Trim(),
+                app_id = body.AppId,
+            });
+        });
+
         app.MapGet("/v1/ops/jobs/{jobId}", (
             HttpContext ctx,
             string jobId,
@@ -473,6 +501,14 @@ public sealed class ReassignConsumerRequest
     public string? Status { get; set; } = "queued";
     /// <summary>Only JoyCaption Orchestrator assign_job payloads (excludes loboforge.com caption API jobs).</summary>
     public bool OrchestratorCaptionOnly { get; set; } = true;
+}
+
+public sealed class RetierJobsRequest
+{
+    public string? AppId { get; set; }
+    public string? Capability { get; set; }
+    public string FromTier { get; set; } = "";
+    public string ToTier { get; set; } = "";
 }
 
 public sealed class PauseAppBody

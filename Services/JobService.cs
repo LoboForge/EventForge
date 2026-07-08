@@ -281,6 +281,68 @@ public sealed class JobService
         return count;
     }
 
+    /// <summary>Move queued jobs between tiers without restart — updates in-memory queue + persistence flush.</summary>
+    public Task<int> RetierQueuedAsync(
+        string? appId,
+        string? capability,
+        string fromTier,
+        string toTier,
+        CancellationToken ct)
+    {
+        var from = fromTier.Trim();
+        var to = toTier.Trim();
+        if (from.Length == 0 || to.Length == 0)
+            return Task.FromResult(0);
+
+        var app = string.IsNullOrWhiteSpace(appId) ? null : appId.Trim();
+        var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
+        var clearPriority = string.Equals(to, "bulk", StringComparison.OrdinalIgnoreCase);
+
+        var jobs = _queue.SnapshotJobs()
+            .Where(j => j.Status == JobStatus.Queued)
+            .Where(j => string.Equals(j.Tier, from, StringComparison.OrdinalIgnoreCase))
+            .Where(j => app == null || string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase))
+            .Where(j => cap == null || string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var count = 0;
+        foreach (var job in jobs)
+        {
+            var updated = new JobRecord
+            {
+                JobId = job.JobId,
+                AppId = job.AppId,
+                Capability = job.Capability,
+                Tier = to,
+                QueuePriority = clearPriority ? null : job.QueuePriority,
+                Kind = job.Kind,
+                PayloadJson = job.PayloadJson,
+                Status = job.Status,
+                WorkerId = job.WorkerId,
+                WorkerHostname = job.WorkerHostname,
+                CreatedAt = job.CreatedAt,
+                LeasedAt = job.LeasedAt,
+                LeasedUntil = job.LeasedUntil,
+                CompletedAt = job.CompletedAt,
+                OutputUrl = job.OutputUrl,
+                OutputContentType = job.OutputContentType,
+                TextReply = job.TextReply,
+                Error = job.Error,
+            };
+            if (_queue.TryUpdate(updated))
+                count++;
+        }
+
+        if (count > 0)
+        {
+            _persist.MarkDirty();
+            _log.LogInformation(
+                "Retiered {Count} queued job(s) from {From} to {To} app={App} cap={Cap}",
+                count, from, to, app ?? "*", cap ?? "*");
+        }
+        return Task.FromResult(count);
+    }
+
     static bool IsOrchestratorCaptionJob(JobRecord job)
     {
         if (!string.Equals(job.Capability, "caption", StringComparison.OrdinalIgnoreCase)) return false;
