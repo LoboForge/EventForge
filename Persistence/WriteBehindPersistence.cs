@@ -266,6 +266,7 @@ public sealed class WriteBehindPersistence : BackgroundService
                   $id, $app, $cap, $tier, $kind, $payload, $status, $worker, $workerHost,
                   $created, $leasedAt, $leased, $completed, $outUrl, $outCt, $text, $error
                 ) ON CONFLICT(job_id) DO UPDATE SET
+                  app_id=$app, capability=$cap, tier=$tier, kind=$kind,
                   status=$status, worker_id=$worker, worker_hostname=$workerHost,
                   leased_at=$leasedAt, leased_until=$leased, completed_at=$completed,
                   output_url=$outUrl, output_content_type=$outCt, text_reply=$text, error=$error

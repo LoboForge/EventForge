@@ -4,6 +4,7 @@ using EventForge.Infrastructure;
 using EventForge.Queue;
 using EventForge.Services;
 using EventForge.WebSocket;
+using System.Text.Json.Serialization;
 
 namespace EventForge.Api;
 
@@ -505,9 +506,13 @@ public sealed class ReassignConsumerRequest
 
 public sealed class RetierJobsRequest
 {
+    [JsonPropertyName("app_id")]
     public string? AppId { get; set; }
+    [JsonPropertyName("capability")]
     public string? Capability { get; set; }
+    [JsonPropertyName("from_tier")]
     public string FromTier { get; set; } = "";
+    [JsonPropertyName("to_tier")]
     public string ToTier { get; set; } = "";
 }
 
