@@ -63,66 +63,13 @@ public static class OpsEndpoints
                 return Results.Unauthorized();
             var jobs = queue.SnapshotJobs()
                 .Where(j => j.Status is JobStatus.Leased or JobStatus.Streaming)
-                .OrderByDescending(j => j.LeasedUntil)
+                .OrderBy(j => j.LeasedAt ?? j.CreatedAt)
                 .Select(ToJobDto)
                 .ToList();
             return Results.Ok(new { count = jobs.Count, jobs });
         });
 
-        app.MapGet("/v1/ops/jobs/{jobId}", (
-            HttpContext ctx,
-            string jobId,
-            InMemoryJobQueue queue,
-            IOpsKeyValidator opsAuth) =>
-        {
-            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
-                return Results.Unauthorized();
-            if (string.IsNullOrWhiteSpace(jobId))
-                return Results.BadRequest(new { error = "job_id required" });
-
-            var job = queue.Get(jobId.Trim())
-                        ?? queue.SnapshotJobs()
-                            .FirstOrDefault(j => j.JobId.StartsWith(jobId.Trim(), StringComparison.OrdinalIgnoreCase));
-            if (job == null)
-                return Results.NotFound(new { job_id = jobId.Trim(), status = "missing" });
-
-            var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
-            return Results.Ok(new
-            {
-                job_id = job.JobId,
-                status = job.Status.ToString().ToLowerInvariant(),
-                capability = job.Capability,
-                tier = job.Tier,
-                kind = job.Kind,
-                model,
-                worker_id = job.WorkerId,
-                hostname = job.WorkerHostname,
-                created_at = job.CreatedAt.ToString("O"),
-                leased_until = job.LeasedUntil?.ToString("O"),
-                completed_at = job.CompletedAt?.ToString("O"),
-                error = job.Error,
-            });
-        });
-
-        app.MapGet("/v1/ops/failures", (
-            HttpContext ctx,
-            InMemoryJobQueue queue,
-            IOpsKeyValidator opsAuth,
-            int limit = 50) =>
-        {
-            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
-                return Results.Unauthorized();
-            limit = Math.Clamp(limit, 1, 200);
-            var jobs = queue.SnapshotJobs()
-                .Where(j => j.Status == JobStatus.Failed)
-                .OrderByDescending(j => j.CompletedAt ?? j.CreatedAt)
-                .Take(limit)
-                .Select(ToJobDto)
-                .ToList();
-            return Results.Ok(new { count = jobs.Count, jobs });
-        });
-
-
+        // Literal job action routes must register before /v1/ops/jobs/{jobId} or POST returns 405.
         app.MapPost("/v1/ops/jobs/purge-queued", async (
             HttpContext ctx,
             PurgeQueuedRequest body,
@@ -181,6 +128,60 @@ public static class OpsEndpoints
                 reassigned,
             });
         });
+
+        app.MapGet("/v1/ops/jobs/{jobId}", (
+            HttpContext ctx,
+            string jobId,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(jobId))
+                return Results.BadRequest(new { error = "job_id required" });
+
+            var job = queue.Get(jobId.Trim())
+                        ?? queue.SnapshotJobs()
+                            .FirstOrDefault(j => j.JobId.StartsWith(jobId.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (job == null)
+                return Results.NotFound(new { job_id = jobId.Trim(), status = "missing" });
+
+            var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
+            return Results.Ok(new
+            {
+                job_id = job.JobId,
+                status = job.Status.ToString().ToLowerInvariant(),
+                capability = job.Capability,
+                tier = job.Tier,
+                kind = job.Kind,
+                model,
+                worker_id = job.WorkerId,
+                hostname = job.WorkerHostname,
+                created_at = job.CreatedAt.ToString("O"),
+                leased_until = job.LeasedUntil?.ToString("O"),
+                completed_at = job.CompletedAt?.ToString("O"),
+                error = job.Error,
+            });
+        });
+
+        app.MapGet("/v1/ops/failures", (
+            HttpContext ctx,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth,
+            int limit = 50) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            limit = Math.Clamp(limit, 1, 200);
+            var jobs = queue.SnapshotJobs()
+                .Where(j => j.Status == JobStatus.Failed)
+                .OrderByDescending(j => j.CompletedAt ?? j.CreatedAt)
+                .Take(limit)
+                .Select(ToJobDto)
+                .ToList();
+            return Results.Ok(new { count = jobs.Count, jobs });
+        });
+
 
         app.MapPost("/v1/ops/jobs/{jobId}/cancel", async (
             HttpContext ctx,
@@ -355,7 +356,7 @@ public static class OpsEndpoints
                 .ToList(),
             active_jobs = queue.SnapshotJobs()
                 .Where(j => j.Status is JobStatus.Leased or JobStatus.Streaming)
-                .OrderByDescending(j => j.LeasedUntil)
+                .OrderBy(j => j.LeasedAt ?? j.CreatedAt)
                 .Take(100)
                 .Select(ToJobDto)
                 .ToList(),
@@ -448,6 +449,7 @@ public static class OpsEndpoints
         worker_id = j.WorkerId,
         hostname = j.WorkerHostname,
         created_at = j.CreatedAt.ToString("O"),
+        leased_at = j.LeasedAt?.ToString("O"),
         leased_until = j.LeasedUntil?.ToString("O"),
         completed_at = j.CompletedAt?.ToString("O"),
         error = j.Error,

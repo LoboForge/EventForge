@@ -13,6 +13,9 @@ export async function opsFetch<T>(path: string, init: RequestInit = {}): Promise
   const headers = new Headers(init.headers)
   if (key) headers.set('X-EventForge-Ops-Key', key)
   headers.set('Accept', 'application/json')
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
   const resp = await fetch(path, { ...init, headers })
   if (resp.status === 401) throw new Error('Unauthorized — check ops API key')
   if (!resp.ok) {
@@ -28,6 +31,9 @@ export async function opsFetchMaybe<T>(path: string, init: RequestInit = {}): Pr
   const headers = new Headers(init.headers)
   if (key) headers.set('X-EventForge-Ops-Key', key)
   headers.set('Accept', 'application/json')
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
   const resp = await fetch(path, { ...init, headers })
   if (resp.status === 401) throw new Error('Unauthorized — check ops API key')
   if (resp.status === 503 || resp.status === 404) return null
@@ -134,6 +140,7 @@ export type JobRow = {
   hostname?: string | null
   worker_id?: string | null
   error?: string | null
+  leased_at?: string | null
   leased_until?: string | null
   created_at?: string | null
   completed_at?: string | null

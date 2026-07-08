@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { opsFetch, opsFetchMaybe } from './api'
+import { SortableTable, type SortableColumn } from './SortableTable'
 import {
   formatReliability,
   formatUsd,
@@ -150,6 +151,91 @@ export function OpsVastTab() {
     }
   }
 
+  const offerColumns = useMemo((): SortableColumn<VastOffer>[] => [
+    {
+      id: 'gpu',
+      header: 'GPU',
+      sortValue: (o) => o.gpuName,
+      render: (o) => <span className="vast-gpu">{o.gpuName}</span>,
+    },
+    {
+      id: 'vram',
+      header: 'VRAM',
+      sortValue: (o) => o.gpuRamMb,
+      render: (o) => formatVramGb(o.gpuRamMb),
+    },
+    {
+      id: 'price',
+      header: '$/hr',
+      sortValue: (o) => o.dphTotal,
+      render: (o) => <span className="vast-price">${formatUsd(o.dphTotal)}</span>,
+      className: 'num-cell',
+    },
+    {
+      id: 'rel',
+      header: 'Rel',
+      sortValue: (o) => o.reliability,
+      render: (o) => formatReliability(o.reliability),
+    },
+    {
+      id: 'location',
+      header: 'Location',
+      sortValue: (o) => o.geolocation,
+      render: (o) => <span className="muted">{o.geolocation}</span>,
+    },
+    {
+      id: 'actions',
+      header: '',
+      sortable: false,
+      render: (o) => <button className="btn" disabled={busy} onClick={() => void rent(o.id)}>Rent</button>,
+      className: 'actions-cell',
+    },
+  ], [busy, rent])
+
+  const instanceColumns = useMemo((): SortableColumn<VastInstance>[] => [
+    { id: 'id', header: 'ID', sortValue: (i) => i.id, render: (i) => i.id, className: 'num-cell' },
+    {
+      id: 'status',
+      header: 'Status',
+      sortValue: (i) => i.actualStatus,
+      render: (i) => <span className="badge idle">{i.actualStatus}</span>,
+    },
+    { id: 'gpu', header: 'GPU', sortValue: (i) => i.gpuName, render: (i) => i.gpuName },
+    {
+      id: 'price',
+      header: '$/hr',
+      sortValue: (i) => i.dphTotal,
+      render: (i) => `$${formatUsd(i.dphTotal)}`,
+      className: 'num-cell',
+    },
+    { id: 'label', header: 'Label', sortValue: (i) => i.label, render: (i) => i.label || '—' },
+    { id: 'ip', header: 'IP', sortValue: (i) => i.publicIp, render: (i) => i.publicIp || '—' },
+    {
+      id: 'ssh',
+      header: 'SSH',
+      sortValue: (i) => i.sshHost ?? '',
+      render: (i) => <span className="muted">{i.sshHost ? `${i.sshHost}:${i.sshPort}` : '—'}</span>,
+    },
+    {
+      id: 'actions',
+      header: '',
+      sortable: false,
+      render: (i) => (
+        <div className="row actions-cell">
+          <button className="btn secondary" disabled={busy}
+            onClick={() => void loadProvisionCommand(i.id)}>Provision cmd</button>
+          <button className="btn secondary" disabled={busy}
+            onClick={() => void instanceAction(`/v1/ops/vast/stop/${i.id}`, `Stopped #${i.id}`)}>Stop</button>
+          <button className="btn secondary" disabled={busy}
+            onClick={() => void instanceAction(`/v1/ops/vast/start/${i.id}`, `Started #${i.id}`)}>Start</button>
+          <button className="btn warn" disabled={busy}
+            onClick={() => void instanceAction(`/v1/ops/vast/terminate/${i.id}`, `Terminated #${i.id}`)}>Terminate</button>
+        </div>
+      ),
+      className: 'actions-cell',
+    },
+  ], [busy, instanceAction, loadProvisionCommand])
+
   if (!status?.configured) {
     return (
       <div className="vast-page">
@@ -260,27 +346,13 @@ export function OpsVastTab() {
           <button className="btn" onClick={() => void runSearch()} disabled={busy}>Search</button>
         </div>
         {searchResults.length > 0 && (
-          <div className="table-wrap">
-            <table className="vast-table">
-              <thead>
-                <tr>
-                  <th>GPU</th><th>VRAM</th><th>$/hr</th><th>Rel</th><th>Location</th><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {searchResults.map((o) => (
-                  <tr key={o.id}>
-                    <td className="vast-gpu">{o.gpuName}</td>
-                    <td>{formatVramGb(o.gpuRamMb)}</td>
-                    <td className="vast-price">${formatUsd(o.dphTotal)}</td>
-                    <td>{formatReliability(o.reliability)}</td>
-                    <td className="muted">{o.geolocation}</td>
-                    <td><button className="btn" disabled={busy} onClick={() => void rent(o.id)}>Rent</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <SortableTable
+            className="vast-table"
+            rows={searchResults}
+            rowKey={(o) => String(o.id)}
+            columns={offerColumns}
+            defaultSort={{ id: 'price', dir: 'asc' }}
+          />
         )}
       </div>
 
@@ -289,40 +361,12 @@ export function OpsVastTab() {
         {instances.length === 0 ? (
           <p className="muted">No running instances on your Vast account.</p>
         ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th><th>Status</th><th>GPU</th><th>$/hr</th><th>Label</th><th>IP</th><th>SSH</th><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {instances.map((i) => (
-                  <tr key={i.id}>
-                    <td>{i.id}</td>
-                    <td><span className="badge idle">{i.actualStatus}</span></td>
-                    <td>{i.gpuName}</td>
-                    <td>${formatUsd(i.dphTotal)}</td>
-                    <td>{i.label || '—'}</td>
-                    <td>{i.publicIp || '—'}</td>
-                    <td className="muted">{i.sshHost ? `${i.sshHost}:${i.sshPort}` : '—'}</td>
-                    <td>
-                      <div className="row">
-                        <button className="btn secondary" disabled={busy}
-                          onClick={() => void loadProvisionCommand(i.id)}>Provision cmd</button>
-                        <button className="btn secondary" disabled={busy}
-                          onClick={() => void instanceAction(`/v1/ops/vast/stop/${i.id}`, `Stopped #${i.id}`)}>Stop</button>
-                        <button className="btn secondary" disabled={busy}
-                          onClick={() => void instanceAction(`/v1/ops/vast/start/${i.id}`, `Started #${i.id}`)}>Start</button>
-                        <button className="btn warn" disabled={busy}
-                          onClick={() => void instanceAction(`/v1/ops/vast/terminate/${i.id}`, `Terminated #${i.id}`)}>Terminate</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <SortableTable
+            rows={instances}
+            rowKey={(i) => String(i.id)}
+            columns={instanceColumns}
+            defaultSort={{ id: 'id', dir: 'desc' }}
+          />
         )}
         {selectedInstance != null && provisionCmd && (
           <div className="provision-cmd">

@@ -1,4 +1,6 @@
-import { Fragment, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { formatDateTime } from './format'
+import { SortableTable, type SortableColumn } from './SortableTable'
 import {
   badgeLabel,
   formatDiskGb,
@@ -121,6 +123,106 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
 
   const genCount = workers.filter(isGenFleetWorker).length
 
+  const columns = useMemo((): SortableColumn<WorkerRow>[] => [
+    {
+      id: 'expand',
+      header: '',
+      sortable: false,
+      className: 'chevron',
+      render: (w) => {
+        const key = workerFleetRowKey(w)
+        return expanded === key ? '▼' : '▶'
+      },
+    },
+    {
+      id: 'hostname',
+      header: 'Hostname',
+      sortValue: (w) => w.hostname,
+      render: (w) => <strong>{w.hostname}</strong>,
+    },
+    {
+      id: 'gpu',
+      header: 'GPU',
+      sortValue: (w) => w.gpuName,
+      render: (w) => <span className="muted">{w.gpuName || '—'}</span>,
+    },
+    {
+      id: 'vram',
+      header: 'VRAM',
+      sortValue: (w) => w.vramFreeMb,
+      render: (w) => `${formatVram(w.vramFreeMb)}${w.vramTotalMb > 0 ? ` / ${formatVram(w.vramTotalMb)}` : ''}`,
+    },
+    {
+      id: 'disk',
+      header: 'Disk',
+      sortValue: (w) => w.diskFreeMb,
+      render: (w) => formatDiskGb(w.diskFreeMb),
+    },
+    {
+      id: 'state',
+      header: 'State',
+      sortValue: (w) => (w.checkInStale ? 'stale' : w.state),
+      render: (w) => (
+        <span className={'badge ' + (w.checkInStale ? 'stale' : w.state === 'busy' ? 'busy' : 'idle')}>
+          {w.checkInStale ? 'stale' : w.state}
+        </span>
+      ),
+    },
+    {
+      id: 'badges',
+      header: 'Badges',
+      sortValue: (w) => w.badges.length,
+      render: (w) => <WorkerBadges badges={w.badges} />,
+    },
+    {
+      id: 'jobs',
+      header: 'Jobs',
+      sortValue: (w) => w.jobsCompleted,
+      render: (w) => <span title="claimed / completed / failed">{w.jobsClaimed} / {w.jobsCompleted} / {w.jobsFailed}</span>,
+    },
+    {
+      id: 'capabilities',
+      header: 'Capabilities',
+      sortValue: (w) => w.capabilities.join(','),
+      className: 'cap-cell',
+      render: (w) => (
+        <>
+          <TagList items={w.capabilities.slice(0, 3)} />
+          {w.capabilities.length > 3 && <span className="muted">+{w.capabilities.length - 3}</span>}
+        </>
+      ),
+    },
+    {
+      id: 'loras',
+      header: 'LoRAs',
+      sortValue: (w) => w.knownLoras.length || w.models.loras.length,
+      render: (w) => w.knownLoras.length || w.models.loras.length,
+      className: 'num-cell',
+    },
+    {
+      id: 'mode',
+      header: 'Mode',
+      sortValue: (w) => w.fleetMode,
+      render: (w) => <span className="muted">{w.fleetMode || '—'}</span>,
+    },
+    {
+      id: 'queue',
+      header: 'EF queue',
+      sortValue: (w) => (w.queueAccessOk === true ? 2 : w.queueAccessOk === false ? 0 : 1),
+      render: (w) => (
+        w.queueAccessOk === true ? 'OK'
+          : w.queueAccessOk === false ? <span className="error">{w.queueAccessError ?? 'fail'}</span>
+            : '—'
+      ),
+    },
+    {
+      id: 'last_seen',
+      header: 'Last seen',
+      sortValue: (w) => w.lastSeenAt,
+      render: (w) => <span className="muted">{formatDateTime(w.lastSeenAt)}</span>,
+    },
+  ], [expanded])
+
   return (
     <div className="card">
       <div className="card-head">
@@ -130,14 +232,14 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
             {workers.length} total · {genCount} gen fleet · click a row for models, LoRAs, and job stats
           </p>
         </div>
-        <div className="row">
+        <div className="row toolbar">
           <input
             className="search-input"
             placeholder="Search hostname, GPU, capability…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <select value={filter} onChange={(e) => setFilter(e.target.value as FleetFilter)}>
+          <select className="select-input" value={filter} onChange={(e) => setFilter(e.target.value as FleetFilter)}>
             <option value="all">All workers ({workers.length})</option>
             <option value="gen">Gen fleet only ({genCount})</option>
             <option value="busy">Busy only</option>
@@ -146,77 +248,34 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
           </select>
         </div>
       </div>
-      {visible.length === 0 ? (
-        <p className="muted">No workers match this filter.</p>
-      ) : (
-        <div className="table-wrap">
-          <table className="fleet-table">
-            <thead>
-              <tr>
-                <th></th>
-                <th>Hostname</th>
-                <th>GPU</th>
-                <th>VRAM</th>
-                <th>Disk</th>
-                <th>State</th>
-                <th>Badges</th>
-                <th>Jobs</th>
-                <th>Capabilities</th>
-                <th>LoRAs</th>
-                <th>Mode</th>
-                <th>EF queue</th>
-                <th>Last seen</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((w) => {
-                const key = workerFleetRowKey(w)
-                const open = expanded === key
-                return (
-                  <Fragment key={key}>
-                    <tr
-                      className={'fleet-row' + (open ? ' expanded' : '')}
-                      onClick={() => setExpanded(open ? null : key)}
-                    >
-                      <td className="chevron">{open ? '▼' : '▶'}</td>
-                      <td><strong>{w.hostname}</strong></td>
-                      <td className="muted">{w.gpuName || '—'}</td>
-                      <td>{formatVram(w.vramFreeMb)}{w.vramTotalMb > 0 ? ` / ${formatVram(w.vramTotalMb)}` : ''}</td>
-                      <td>{formatDiskGb(w.diskFreeMb)}</td>
-                      <td>
-                        <span className={'badge ' + (w.checkInStale ? 'stale' : w.state === 'busy' ? 'busy' : 'idle')}>
-                          {w.checkInStale ? 'stale' : w.state}
-                        </span>
-                      </td>
-                      <td><WorkerBadges badges={w.badges} /></td>
-                      <td>
-                        <span title="claimed / completed / failed">{w.jobsClaimed} / {w.jobsCompleted} / {w.jobsFailed}</span>
-                      </td>
-                      <td className="cap-cell">
-                        <TagList items={w.capabilities.slice(0, 3)} />
-                        {w.capabilities.length > 3 && <span className="muted">+{w.capabilities.length - 3}</span>}
-                      </td>
-                      <td>{w.knownLoras.length || w.models.loras.length}</td>
-                      <td className="muted">{w.fleetMode || '—'}</td>
-                      <td>
-                        {w.queueAccessOk === true ? 'OK'
-                          : w.queueAccessOk === false ? <span className="error">{w.queueAccessError ?? 'fail'}</span>
-                            : '—'}
-                      </td>
-                      <td className="muted">{w.lastSeenAt ? new Date(w.lastSeenAt).toLocaleTimeString() : '—'}</td>
-                    </tr>
-                    {open && (
-                      <tr className="fleet-detail-row">
-                        <td colSpan={13}><WorkerDetail w={w} /></td>
-                      </tr>
-                    )}
-                  </Fragment>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <SortableTable
+        className="fleet-table"
+        rows={visible}
+        rowKey={workerFleetRowKey}
+        columns={columns}
+        defaultSort={{ id: 'hostname', dir: 'asc' }}
+        emptyMessage="No workers match this filter."
+        onRowClick={(w) => {
+          const key = workerFleetRowKey(w)
+          setExpanded((prev) => (prev === key ? null : key))
+        }}
+        rowClassName={(w) => {
+          const key = workerFleetRowKey(w)
+          const classes = ['fleet-row']
+          if (expanded === key) classes.push('expanded')
+          if (w.badges.length > 0) classes.push('has-issues')
+          return classes.join(' ')
+        }}
+        renderRowExtra={(w) => {
+          const key = workerFleetRowKey(w)
+          if (expanded !== key) return null
+          return (
+            <tr className="fleet-detail-row">
+              <td colSpan={columns.length}><WorkerDetail w={w} /></td>
+            </tr>
+          )
+        }}
+      />
     </div>
   )
 }

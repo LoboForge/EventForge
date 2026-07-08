@@ -30,6 +30,8 @@ public sealed class JobRecord
     /// <summary>Display identity from claim body (hostname); auth token maps to WorkerId.</summary>
     public string? WorkerHostname { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    /// <summary>When the job was last claimed (unchanged on lease extension).</summary>
+    public DateTimeOffset? LeasedAt { get; set; }
     public DateTimeOffset? LeasedUntil { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public string? OutputUrl { get; set; }

@@ -72,6 +72,7 @@ public sealed class WriteBehindPersistence : BackgroundService
             """;
         await cmd.ExecuteNonQueryAsync(ct);
         await EnsureWorkerHostnameColumnAsync(conn, ct);
+        await EnsureLeasedAtColumnAsync(conn, ct);
 
         cmd.CommandText = """
             SELECT * FROM jobs
@@ -95,6 +96,7 @@ public sealed class WriteBehindPersistence : BackgroundService
                     job.Status = JobStatus.Queued;
                     job.WorkerId = null;
                     job.WorkerHostname = null;
+                    job.LeasedAt = null;
                     job.LeasedUntil = null;
                 }
             }
@@ -126,6 +128,7 @@ public sealed class WriteBehindPersistence : BackgroundService
                 fromDb.Status = JobStatus.Queued;
                 fromDb.WorkerId = null;
                 fromDb.WorkerHostname = null;
+                fromDb.LeasedAt = null;
                 fromDb.LeasedUntil = null;
             }
         }
@@ -258,12 +261,13 @@ public sealed class WriteBehindPersistence : BackgroundService
             upsert.CommandText = """
                 INSERT INTO jobs (
                   job_id, app_id, capability, tier, kind, payload_json, status, worker_id, worker_hostname,
-                  created_at, leased_until, completed_at, output_url, output_content_type, text_reply, error
+                  created_at, leased_at, leased_until, completed_at, output_url, output_content_type, text_reply, error
                 ) VALUES (
                   $id, $app, $cap, $tier, $kind, $payload, $status, $worker, $workerHost,
-                  $created, $leased, $completed, $outUrl, $outCt, $text, $error
+                  $created, $leasedAt, $leased, $completed, $outUrl, $outCt, $text, $error
                 ) ON CONFLICT(job_id) DO UPDATE SET
-                  status=$status, worker_id=$worker, worker_hostname=$workerHost, leased_until=$leased, completed_at=$completed,
+                  status=$status, worker_id=$worker, worker_hostname=$workerHost,
+                  leased_at=$leasedAt, leased_until=$leased, completed_at=$completed,
                   output_url=$outUrl, output_content_type=$outCt, text_reply=$text, error=$error
                 """;
             BindJob(upsert, job);
@@ -291,6 +295,26 @@ public sealed class WriteBehindPersistence : BackgroundService
         if (hasColumn) return;
         await using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE jobs ADD COLUMN worker_hostname TEXT";
+        await alter.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task EnsureLeasedAtColumnAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA table_info(jobs)";
+        await using var reader = await pragma.ExecuteReaderAsync(ct);
+        var hasColumn = false;
+        while (await reader.ReadAsync(ct))
+        {
+            if (string.Equals(reader.GetString(1), "leased_at", StringComparison.OrdinalIgnoreCase))
+            {
+                hasColumn = true;
+                break;
+            }
+        }
+        if (hasColumn) return;
+        await using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE jobs ADD COLUMN leased_at TEXT";
         await alter.ExecuteNonQueryAsync(ct);
     }
 
@@ -341,6 +365,7 @@ public sealed class WriteBehindPersistence : BackgroundService
         cmd.Parameters.AddWithValue("$worker", (object?)job.WorkerId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$workerHost", (object?)job.WorkerHostname ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$created", job.CreatedAt.ToString("O"));
+        cmd.Parameters.AddWithValue("$leasedAt", job.LeasedAt?.ToString("O") ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$leased", job.LeasedUntil?.ToString("O") ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$completed", job.CompletedAt?.ToString("O") ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$outUrl", (object?)job.OutputUrl ?? DBNull.Value);
@@ -361,11 +386,12 @@ public sealed class WriteBehindPersistence : BackgroundService
         WorkerId = GetNullableString(r, "worker_id", 7),
         WorkerHostname = GetNullableString(r, "worker_hostname", 8),
         CreatedAt = DateTimeOffset.Parse(GetString(r, "created_at", 9) ?? r.GetString(8)),
-        LeasedUntil = ParseNullableDate(GetString(r, "leased_until", 10) ?? (r.FieldCount > 9 && !r.IsDBNull(9) ? r.GetString(9) : null)),
-        CompletedAt = ParseNullableDate(GetString(r, "completed_at", 11) ?? (r.FieldCount > 10 && !r.IsDBNull(10) ? r.GetString(10) : null)),
-        OutputUrl = GetNullableString(r, "output_url", 12) ?? (r.FieldCount > 11 && !r.IsDBNull(11) ? r.GetString(11) : null),
-        OutputContentType = GetNullableString(r, "output_content_type", 13) ?? (r.FieldCount > 12 && !r.IsDBNull(12) ? r.GetString(12) : null),
-        TextReply = GetNullableString(r, "text_reply", 14) ?? (r.FieldCount > 13 && !r.IsDBNull(13) ? r.GetString(13) : null),
-        Error = GetNullableString(r, "error", 15) ?? (r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14) : null),
+        LeasedAt = ParseNullableDate(GetString(r, "leased_at", 10)),
+        LeasedUntil = ParseNullableDate(GetString(r, "leased_until", 11) ?? (r.FieldCount > 9 && !r.IsDBNull(9) ? r.GetString(9) : null)),
+        CompletedAt = ParseNullableDate(GetString(r, "completed_at", 12) ?? (r.FieldCount > 10 && !r.IsDBNull(10) ? r.GetString(10) : null)),
+        OutputUrl = GetNullableString(r, "output_url", 13) ?? (r.FieldCount > 11 && !r.IsDBNull(11) ? r.GetString(11) : null),
+        OutputContentType = GetNullableString(r, "output_content_type", 14) ?? (r.FieldCount > 12 && !r.IsDBNull(12) ? r.GetString(12) : null),
+        TextReply = GetNullableString(r, "text_reply", 15) ?? (r.FieldCount > 13 && !r.IsDBNull(13) ? r.GetString(13) : null),
+        Error = GetNullableString(r, "error", 16) ?? (r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14) : null),
     };
 }

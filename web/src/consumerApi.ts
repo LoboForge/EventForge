@@ -36,6 +36,7 @@ export type ConsumerJob = {
   worker_id?: string | null
   hostname?: string | null
   created_at: string
+  leased_at?: string | null
   leased_until?: string | null
   completed_at?: string | null
   error?: string | null

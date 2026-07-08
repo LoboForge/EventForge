@@ -149,10 +149,12 @@ public sealed class InMemoryJobQueue
         TimeSpan lease,
         int queueIndex)
     {
+        var now = DateTimeOffset.UtcNow;
         job.Status = JobStatus.Leased;
         job.WorkerId = workerId;
         job.WorkerHostname = string.IsNullOrWhiteSpace(workerHostname) ? null : workerHostname.Trim();
-        job.LeasedUntil = DateTimeOffset.UtcNow.Add(lease);
+        job.LeasedAt = now;
+        job.LeasedUntil = now.Add(lease);
         _queuedOrder.RemoveAt(queueIndex);
         return Clone(job);
     }
@@ -176,6 +178,7 @@ public sealed class InMemoryJobQueue
             job.Status = JobStatus.Queued;
             job.WorkerId = null;
             job.WorkerHostname = null;
+            job.LeasedAt = null;
             job.LeasedUntil = null;
             if (!_queuedOrder.Contains(job.JobId))
                 _queuedOrder.Add(job.JobId);
@@ -274,6 +277,7 @@ public sealed class InMemoryJobQueue
             job.Status = JobStatus.Queued;
             job.WorkerId = null;
             job.WorkerHostname = null;
+            job.LeasedAt = null;
             job.LeasedUntil = null;
             if (!_queuedOrder.Contains(job.JobId))
                 _queuedOrder.Add(job.JobId);
@@ -301,6 +305,7 @@ public sealed class InMemoryJobQueue
         WorkerId = j.WorkerId,
         WorkerHostname = j.WorkerHostname,
         CreatedAt = j.CreatedAt,
+        LeasedAt = j.LeasedAt,
         LeasedUntil = j.LeasedUntil,
         CompletedAt = j.CompletedAt,
         OutputUrl = j.OutputUrl,
@@ -322,6 +327,7 @@ public sealed class InMemoryJobQueue
         WorkerId = j.WorkerId,
         WorkerHostname = j.WorkerHostname,
         CreatedAt = j.CreatedAt,
+        LeasedAt = j.LeasedAt,
         LeasedUntil = j.LeasedUntil,
         CompletedAt = j.CompletedAt,
         OutputUrl = j.OutputUrl,

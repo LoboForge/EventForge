@@ -19,8 +19,9 @@ phases:
       nodejs: 20
   pre_build:
     commands:
-      - echo "Running EventForge unit tests..."
-      - dotnet test EventForge.Tests/EventForge.Tests.csproj --configuration Release --verbosity normal
+      - echo "Running EventForge CI gate (tests + web build)..."
+      - chmod +x scripts/ci.sh
+      - bash scripts/ci.sh
       - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
       - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME

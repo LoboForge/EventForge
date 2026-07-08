@@ -20,6 +20,9 @@ Read this before changing EventForge code, ops workflows, or GPU fleet boxes. Yo
 | Keep `desiredCount=1` always | **Never** set `desiredCount=0` to "restart" — that takes the site fully offline (Cloudflare 530) |
 | Restart with `--desired-count 1 --force-new-deployment` | Stop/delete the service or leave it at 0 without immediately scaling back |
 | Verify `/health` returns 200 after any ECS change | Assume a deploy "completed" if `/health` is down |
+| **Keep old workers until replacements check in and claim jobs** | Terminate the only box handling a capability before new boxes are provisioned |
+
+**Fleet cutover rule:** never destroy/stop a Vast worker that is the **only** box polling a capability (`wan`, `ltx`, `image`, …) until at least one **replacement** has finished provisioning, checked into `/v1/ops/fleet`, and successfully claimed a job (or you've confirmed two+ healthy replacements). Rent first, verify, then retire.
 
 **Correct prod restart** (replaces the running task; ~30–90s gap, then self-recovers):
 

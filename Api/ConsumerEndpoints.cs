@@ -183,6 +183,7 @@ public static class ConsumerEndpoints
         worker_id = j.WorkerId,
         hostname = j.WorkerHostname,
         created_at = j.CreatedAt.ToString("O"),
+        leased_at = j.LeasedAt?.ToString("O"),
         leased_until = j.LeasedUntil?.ToString("O"),
         completed_at = j.CompletedAt?.ToString("O"),
         error = j.Error,

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { applyPageSeo } from './seo'
 import { Link } from './router'
 import { BarChart, DonutChart, LineChart } from './charts'
+import { formatDateTime, formatDuration, runningDurationMs } from './format'
+import { useNow } from './hooks'
+import { SortableTable, type SortableColumn } from './SortableTable'
 import {
   consumerFetch,
   getApiKey,
@@ -40,9 +43,14 @@ function Login({ onLogin }: { onLogin: () => void }) {
   }
 
   return (
-    <div className="app-shell login card">
-      <h1>EventForge Dashboard</h1>
-      <p className="muted">Monitor jobs, queue depth, and usage for your integration.</p>
+    <div className="app-shell login card ops-login">
+      <div className="ops-login-brand">
+        <span className="ops-logo-mark">EF</span>
+        <div>
+          <h1>EventForge Dashboard</h1>
+          <p className="muted">Monitor jobs, queue depth, and usage for your integration.</p>
+        </div>
+      </div>
       <form onSubmit={(e) => void submit(e)}>
         <label htmlFor="api-key">App API key</label>
         <input id="api-key" type="password" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
@@ -67,50 +75,88 @@ function JobsTable({
   onCancel: (id: string, inFlight: boolean) => void
   busyId: string | null
 }) {
-  if (!jobs.length) return <p className="muted">No jobs yet.</p>
+  const now = useNow(jobs.some((j) => j.status === 'leased' || j.status === 'streaming'))
+
+  const columns = useMemo((): SortableColumn<ConsumerJob>[] => [
+    {
+      id: 'job',
+      header: 'Job',
+      sortValue: (j) => j.job_id,
+      render: (j) => <code title={j.job_id}>{j.job_id.slice(0, 8)}</code>,
+    },
+    {
+      id: 'capability',
+      header: 'Capability',
+      sortValue: (j) => j.capability,
+      render: (j) => j.capability,
+    },
+    {
+      id: 'tier',
+      header: 'Tier',
+      sortValue: (j) => j.tier,
+      render: (j) => j.tier,
+    },
+    {
+      id: 'status',
+      header: 'Status',
+      sortValue: (j) => j.status,
+      render: (j) => <JobStatusBadge status={j.status} />,
+    },
+    {
+      id: 'worker',
+      header: 'Worker',
+      sortValue: (j) => j.hostname ?? j.worker_id ?? '',
+      render: (j) => <span className="muted">{j.hostname ?? j.worker_id ?? '—'}</span>,
+    },
+    {
+      id: 'created',
+      header: 'Created',
+      sortValue: (j) => j.created_at,
+      render: (j) => <span className="muted">{formatDateTime(j.created_at)}</span>,
+    },
+    {
+      id: 'running',
+      header: 'Running',
+      sortValue: (j) => runningDurationMs(j.leased_at, now) ?? -1,
+      render: (j) => {
+        const ms = runningDurationMs(j.leased_at, now)
+        return ms != null ? formatDuration(ms) : '—'
+      },
+      className: 'num-cell',
+    },
+    {
+      id: 'actions',
+      header: '',
+      sortable: false,
+      render: (j) => {
+        const cancellable = j.status === 'queued' || j.status === 'leased' || j.status === 'streaming'
+        return (
+          <>
+            {cancellable && (
+              <button
+                className="btn secondary small"
+                disabled={busyId === j.job_id}
+                onClick={() => onCancel(j.job_id, j.status !== 'queued')}
+              >
+                {busyId === j.job_id ? '…' : 'Cancel'}
+              </button>
+            )}
+            {j.error && <span className="error inline">{j.error}</span>}
+          </>
+        )
+      },
+      className: 'actions-cell',
+    },
+  ], [busyId, now, onCancel])
+
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Job</th>
-            <th>Capability</th>
-            <th>Tier</th>
-            <th>Status</th>
-            <th>Worker</th>
-            <th>Created</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {jobs.map((j) => {
-            const cancellable = j.status === 'queued' || j.status === 'leased' || j.status === 'streaming'
-            return (
-              <tr key={j.job_id}>
-                <td><code title={j.job_id}>{j.job_id.slice(0, 8)}</code></td>
-                <td>{j.capability}</td>
-                <td>{j.tier}</td>
-                <td><JobStatusBadge status={j.status} /></td>
-                <td className="muted">{j.hostname ?? j.worker_id ?? '—'}</td>
-                <td className="muted">{new Date(j.created_at).toLocaleString()}</td>
-                <td>
-                  {cancellable && (
-                    <button
-                      className="btn secondary small"
-                      disabled={busyId === j.job_id}
-                      onClick={() => onCancel(j.job_id, j.status !== 'queued')}
-                    >
-                      {busyId === j.job_id ? '…' : 'Cancel'}
-                    </button>
-                  )}
-                  {j.error && <span className="error inline">{j.error}</span>}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+    <SortableTable
+      rows={jobs}
+      rowKey={(j) => j.job_id}
+      columns={columns}
+      defaultSort={{ id: 'created', dir: 'desc' }}
+      emptyMessage="No jobs yet."
+    />
   )
 }
 
@@ -219,17 +265,21 @@ export default function DashboardApp() {
 
   return (
     <div className="app-shell dashboard-app">
-      <div className="topbar">
-        <div>
-          <h1>EventForge Dashboard</h1>
-          <p className="muted card-sub">App <code>{me?.app_id ?? stats?.app_id ?? '—'}</code></p>
+      <header className="ops-header dashboard-header">
+        <div className="ops-header-left">
+          <span className="ops-logo-mark">EF</span>
+          <div>
+            <h1>EventForge Dashboard</h1>
+            <p className="muted card-sub">App <code>{me?.app_id ?? stats?.app_id ?? '—'}</code></p>
+          </div>
         </div>
-        <div className="row">
-          <Link to="/" className="muted">← Public site</Link>
+        <div className="row ops-header-actions">
+          <Link to="/" className="muted">Public site</Link>
+          <Link to="/ops" className="muted">Ops console</Link>
           <button className="btn secondary" onClick={() => void refresh()}>Refresh</button>
           <button className="btn secondary" onClick={() => { sessionStorage.removeItem('eventforge_api_key'); setAuthed(false) }}>Sign out</button>
         </div>
-      </div>
+      </header>
 
       {me?.paused && (
         <div className="error banner">
@@ -289,7 +339,7 @@ export default function DashboardApp() {
             <p className="muted card-sub">Recent jobs for this API key. Cancel queued or in-flight work below.</p>
           </div>
           <div className="row">
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <select className="select-input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">All statuses</option>
               <option value="queued">Queued</option>
               <option value="leased">Leased</option>

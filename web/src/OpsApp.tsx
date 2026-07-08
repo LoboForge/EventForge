@@ -2,14 +2,19 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { applyPageSeo } from './seo'
 import { Link } from './router'
 import { BarChart, DonutChart, LineChart, parseMetricsSample } from './charts'
+import { formatDateTime, formatDuration, runningDurationMs } from './format'
+import { useNow } from './hooks'
+import { SortableTable, type SortableColumn } from './SortableTable'
 import {
   getOpsKey,
   normalizeWorker,
   opsFetch,
   setOpsKey,
+  type JobRow,
   type OpsAppRow,
   type MetricsHistoryResponse,
   type Snapshot,
+  type WorkerRow,
 } from './api'
 import { OpsFleetTab } from './OpsFleetTab'
 import { OpsVastTab } from './OpsVastTab'
@@ -23,6 +28,15 @@ const TAB_LABELS: Record<Tab, string> = {
   apps: 'Consumers',
   failures: 'Failures',
   vast: 'Vast.ai',
+}
+
+function isOrphanLease(job: JobRow, workers: WorkerRow[]): boolean {
+  const host = job.hostname?.trim()
+  if (!host) return false
+  const worker = workers.find((w) => w.hostname === host)
+  if (!worker) return false
+  const active = worker.currentJobUuid || worker.activeJobId
+  return !!active && active !== job.job_id
 }
 
 function Login({ onLogin }: { onLogin: () => void }) {
@@ -126,8 +140,129 @@ function OverviewTab({ snapshot, metrics }: { snapshot: Snapshot | null; metrics
   )
 }
 
-function QueueTab({ snapshot, onCancel, busyId }: { snapshot: Snapshot | null; onCancel: (jobId: string) => void; busyId: string | null }) {
+const capabilityColumns: SortableColumn<NonNullable<Snapshot['queue']['by_capability']>[number]>[] = [
+  {
+    id: 'capability',
+    header: 'Capability',
+    sortValue: (row) => row.capability,
+    render: (row) => <code>{row.capability}</code>,
+  },
+  {
+    id: 'queued',
+    header: 'Queued',
+    sortValue: (row) => row.queued,
+    render: (row) => row.queued,
+    className: 'num-cell',
+  },
+  {
+    id: 'in_progress',
+    header: 'In progress',
+    sortValue: (row) => row.in_progress,
+    render: (row) => row.in_progress,
+    className: 'num-cell',
+  },
+  {
+    id: 'failed',
+    header: 'Failed',
+    sortValue: (row) => row.failed,
+    render: (row) => row.failed,
+    className: 'num-cell',
+  },
+]
+
+function QueueTab({
+  snapshot,
+  activeJobs,
+  workers,
+  onCancel,
+  busyId,
+}: {
+  snapshot: Snapshot | null
+  activeJobs: JobRow[]
+  workers: WorkerRow[]
+  onCancel: (jobId: string) => void
+  busyId: string | null
+}) {
   const q = snapshot?.queue
+  const now = useNow(true)
+  const jobs = activeJobs.length ? activeJobs : (snapshot?.active_jobs ?? [])
+
+  const columns = useMemo((): SortableColumn<JobRow>[] => [
+    {
+      id: 'job',
+      header: 'Job',
+      sortValue: (row) => row.job_id,
+      render: (row) => <code title={row.job_id}>{row.job_id.slice(0, 8)}</code>,
+    },
+    {
+      id: 'app',
+      header: 'App',
+      sortValue: (row) => row.app_id ?? '',
+      render: (row) => <code title={row.app_id}>{row.app_id ?? '—'}</code>,
+    },
+    {
+      id: 'capability',
+      header: 'Capability',
+      sortValue: (row) => row.capability,
+      render: (row) => row.capability,
+    },
+    {
+      id: 'tier',
+      header: 'Tier',
+      sortValue: (row) => row.tier,
+      render: (row) => row.tier,
+    },
+    {
+      id: 'worker',
+      header: 'Worker',
+      sortValue: (row) => row.hostname ?? row.worker_id ?? '',
+      render: (row) => row.hostname ?? row.worker_id ?? '—',
+    },
+    {
+      id: 'picked_up',
+      header: 'Picked up',
+      sortValue: (row) => row.leased_at ?? row.created_at ?? '',
+      render: (row) => (
+        <span className="muted" title={row.leased_at ?? row.created_at ?? undefined}>
+          {formatDateTime(row.leased_at ?? row.created_at)}
+        </span>
+      ),
+    },
+    {
+      id: 'running',
+      header: 'Running',
+      sortValue: (row) => runningDurationMs(row.leased_at, now) ?? -1,
+      render: (row) => {
+        const ms = runningDurationMs(row.leased_at, now)
+        const orphan = isOrphanLease(row, workers)
+        return (
+          <span className={orphan ? 'warn-text' : ''} title={orphan ? 'Worker is busy on a different job' : undefined}>
+            {ms != null ? formatDuration(ms) : '—'}
+            {orphan && <span className="badge stale orphan-badge">orphan</span>}
+          </span>
+        )
+      },
+      className: 'num-cell',
+    },
+    {
+      id: 'lease_until',
+      header: 'Lease until',
+      sortValue: (row) => row.leased_until ?? '',
+      render: (row) => <span className="muted">{formatDateTime(row.leased_until)}</span>,
+    },
+    {
+      id: 'actions',
+      header: '',
+      sortable: false,
+      render: (row) => (
+        <button className="btn secondary small" disabled={busyId === row.job_id} onClick={() => onCancel(row.job_id)}>
+          {busyId === row.job_id ? '…' : 'Cancel'}
+        </button>
+      ),
+      className: 'actions-cell',
+    },
+  ], [busyId, now, onCancel, workers])
+
   return (
     <>
       <div className="stats compact-stats">
@@ -136,44 +271,37 @@ function QueueTab({ snapshot, onCancel, busyId }: { snapshot: Snapshot | null; o
         <div className="stat"><div className="label">Completed</div><div className="value ok-text">{q?.jobs_completed ?? 0}</div></div>
         <div className="stat"><div className="label">Failed</div><div className="value">{q?.jobs_failed ?? 0}</div></div>
       </div>
+
+      <div className="card queue-active-card">
+        <div className="card-head">
+          <div>
+            <h2>Jobs in progress</h2>
+            <p className="muted card-sub">
+              {jobs.length} leased job{jobs.length === 1 ? '' : 's'} · sorted by runtime · orphan = worker moved on without completing
+            </p>
+          </div>
+        </div>
+        <SortableTable
+          className="queue-active-table"
+          rows={jobs}
+          rowKey={(row) => row.job_id}
+          columns={columns}
+          defaultSort={{ id: 'running', dir: 'desc' }}
+          rowClassName={(row) => (isOrphanLease(row, workers) ? 'orphan-row' : undefined)}
+          emptyMessage="No jobs in progress."
+        />
+      </div>
+
       <div className="card">
         <h2>Queue depth by capability</h2>
-        <table>
-          <thead><tr><th>Capability</th><th>Queued</th><th>In progress</th><th>Failed</th></tr></thead>
-          <tbody>
-            {(q?.by_capability ?? []).map((row) => (
-              <tr key={row.capability}>
-                <td><code>{row.capability}</code></td>
-                <td>{row.queued}</td>
-                <td>{row.in_progress}</td>
-                <td>{row.failed}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="card">
-        <h2>Active jobs</h2>
-        <table>
-          <thead><tr><th>Job</th><th>App</th><th>Capability</th><th>Tier</th><th>Worker</th><th>Lease until</th><th></th></tr></thead>
-          <tbody>
-            {(snapshot?.active_jobs ?? []).map((j) => (
-              <tr key={j.job_id}>
-                <td><code>{j.job_id.slice(0, 8)}</code></td>
-                <td className="muted"><code>{j.app_id?.slice(0, 8) ?? '—'}</code></td>
-                <td>{j.capability}</td>
-                <td>{j.tier}</td>
-                <td>{j.hostname ?? j.worker_id ?? '—'}</td>
-                <td className="muted">{j.leased_until ? new Date(j.leased_until).toLocaleTimeString() : '—'}</td>
-                <td>
-                  <button className="btn secondary small" disabled={busyId === j.job_id} onClick={() => onCancel(j.job_id)}>
-                    {busyId === j.job_id ? '…' : 'Cancel'}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <SortableTable
+          className="queue-cap-table"
+          rows={q?.by_capability ?? []}
+          rowKey={(row) => row.capability}
+          defaultSort={{ id: 'queued', dir: 'desc' }}
+          columns={capabilityColumns}
+          emptyMessage="No queued work."
+        />
       </div>
     </>
   )
@@ -242,58 +370,126 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
           <p className="muted card-sub">Pause enqueue when a customer is out of generations. Purge queued work per app.</p>
         </div>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>App ID</th><th>Status</th><th>Queued</th><th>In progress</th><th>Completed</th><th>Failed</th><th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {apps.map((a) => (
-            <tr key={a.app_id}>
-              <td><code>{a.app_id}</code></td>
-              <td>
+      <SortableTable
+        rows={apps}
+        rowKey={(a) => a.app_id}
+        defaultSort={{ id: 'queued', dir: 'desc' }}
+        columns={[
+          {
+            id: 'app_id',
+            header: 'App ID',
+            sortValue: (a) => a.app_id,
+            render: (a) => <code>{a.app_id}</code>,
+          },
+          {
+            id: 'status',
+            header: 'Status',
+            sortValue: (a) => (a.paused ? 1 : 0),
+            render: (a) => (
+              <>
                 {a.paused ? <span className="badge paused">paused</span> : <span className="badge idle">active</span>}
                 {a.pause_reason && <span className="muted small"> {a.pause_reason}</span>}
-              </td>
-              <td>{a.jobs_queued}</td>
-              <td>{a.jobs_in_progress}</td>
-              <td className="ok-text">{a.jobs_completed}</td>
-              <td>{a.jobs_failed}</td>
-              <td className="actions-cell">
+              </>
+            ),
+          },
+          {
+            id: 'jobs_queued',
+            header: 'Queued',
+            sortValue: (a) => a.jobs_queued,
+            render: (a) => a.jobs_queued,
+            className: 'num-cell',
+          },
+          {
+            id: 'jobs_in_progress',
+            header: 'In progress',
+            sortValue: (a) => a.jobs_in_progress,
+            render: (a) => a.jobs_in_progress,
+            className: 'num-cell',
+          },
+          {
+            id: 'jobs_completed',
+            header: 'Completed',
+            sortValue: (a) => a.jobs_completed,
+            render: (a) => <span className="ok-text">{a.jobs_completed}</span>,
+            className: 'num-cell',
+          },
+          {
+            id: 'jobs_failed',
+            header: 'Failed',
+            sortValue: (a) => a.jobs_failed,
+            render: (a) => a.jobs_failed,
+            className: 'num-cell',
+          },
+          {
+            id: 'actions',
+            header: 'Actions',
+            sortable: false,
+            render: (a) => (
+              <div className="actions-cell">
                 {a.paused
                   ? <button className="btn secondary small" disabled={busy === `unpause:${a.app_id}`} onClick={() => void unpause(a.app_id)}>Unpause</button>
                   : <button className="btn warn small" disabled={busy === `pause:${a.app_id}`} onClick={() => void pause(a.app_id)}>Pause</button>}
                 <button className="btn secondary small" disabled={busy === `purge:${a.app_id}` || a.jobs_queued === 0} onClick={() => void purgeQueued(a.app_id)}>Purge queued</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {apps.length === 0 && <p className="muted">No consumer apps with jobs in memory yet.</p>}
+              </div>
+            ),
+            className: 'actions-cell',
+          },
+        ]}
+        emptyMessage="No consumer apps with jobs in memory yet."
+      />
     </div>
   )
 }
 
 function FailuresTab({ snapshot }: { snapshot: Snapshot | null }) {
+  const failures = snapshot?.recent_failures ?? []
   return (
     <div className="card">
       <h2>Recent failures</h2>
-      <table>
-        <thead><tr><th>Job</th><th>App</th><th>Capability</th><th>Worker</th><th>Error</th><th>When</th></tr></thead>
-        <tbody>
-          {(snapshot?.recent_failures ?? []).map((j) => (
-            <tr key={j.job_id}>
-              <td><code>{j.job_id.slice(0, 8)}</code></td>
-              <td className="muted"><code>{j.app_id?.slice(0, 8) ?? '—'}</code></td>
-              <td>{j.capability}</td>
-              <td>{j.hostname ?? j.worker_id ?? '—'}</td>
-              <td className="error">{j.error ?? '—'}</td>
-              <td className="muted">{j.completed_at ? new Date(j.completed_at).toLocaleString() : '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <SortableTable
+        rows={failures}
+        rowKey={(j) => j.job_id}
+        defaultSort={{ id: 'when', dir: 'desc' }}
+        columns={[
+          {
+            id: 'job',
+            header: 'Job',
+            sortValue: (j) => j.job_id,
+            render: (j) => <code title={j.job_id}>{j.job_id.slice(0, 8)}</code>,
+          },
+          {
+            id: 'app',
+            header: 'App',
+            sortValue: (j) => j.app_id ?? '',
+            render: (j) => <code className="muted" title={j.app_id}>{j.app_id?.slice(0, 12) ?? '—'}</code>,
+          },
+          {
+            id: 'capability',
+            header: 'Capability',
+            sortValue: (j) => j.capability,
+            render: (j) => j.capability,
+          },
+          {
+            id: 'worker',
+            header: 'Worker',
+            sortValue: (j) => j.hostname ?? j.worker_id ?? '',
+            render: (j) => j.hostname ?? j.worker_id ?? '—',
+          },
+          {
+            id: 'error',
+            header: 'Error',
+            sortValue: (j) => j.error ?? '',
+            render: (j) => <span className="error">{j.error ?? '—'}</span>,
+          },
+          {
+            id: 'when',
+            header: 'When',
+            sortValue: (j) => j.completed_at ?? j.created_at ?? '',
+            render: (j) => <span className="muted">{formatDateTime(j.completed_at ?? j.created_at)}</span>,
+          },
+        ]}
+        emptyMessage="No recent failures."
+      />
     </div>
   )
 }
@@ -304,6 +500,7 @@ export default function OpsApp() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [metrics, setMetrics] = useState<ReturnType<typeof parseMetricsSample>[]>([])
   const [apps, setApps] = useState<OpsAppRow[]>([])
+  const [activeJobs, setActiveJobs] = useState<JobRow[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [cancelBusy, setCancelBusy] = useState<string | null>(null)
 
@@ -319,14 +516,16 @@ export default function OpsApp() {
   const refresh = useCallback(async () => {
     if (!getOpsKey()) return
     try {
-      const [snap, hist, appList] = await Promise.all([
+      const [snap, hist, appList, active] = await Promise.all([
         opsFetch<Snapshot>('/v1/ops/snapshot'),
         opsFetch<MetricsHistoryResponse>('/v1/ops/metrics/history?limit=60'),
         opsFetch<{ apps: OpsAppRow[] }>('/v1/ops/apps'),
+        opsFetch<{ jobs: JobRow[] }>('/v1/ops/jobs/active'),
       ])
       setSnapshot(snap)
       setMetrics((hist.samples ?? []).map((s) => parseMetricsSample(s)))
       setApps(appList.apps ?? [])
+      setActiveJobs(active.jobs ?? [])
       setErr(null)
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -415,7 +614,15 @@ export default function OpsApp() {
       </nav>
       {tab === 'overview' && <OverviewTab snapshot={snapshot} metrics={metrics} />}
       {tab === 'fleet' && <OpsFleetTab workers={workers} />}
-      {tab === 'queue' && <QueueTab snapshot={snapshot} onCancel={(id) => void cancelJob(id)} busyId={cancelBusy} />}
+      {tab === 'queue' && (
+        <QueueTab
+          snapshot={snapshot}
+          activeJobs={activeJobs}
+          workers={workers}
+          onCancel={(id) => void cancelJob(id)}
+          busyId={cancelBusy}
+        />
+      )}
       {tab === 'apps' && <AppsTab apps={appRows} onRefresh={() => void refresh()} />}
       {tab === 'failures' && <FailuresTab snapshot={snapshot} />}
       {tab === 'vast' && <OpsVastTab />}

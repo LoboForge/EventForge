@@ -11,6 +11,35 @@ Read this before changing EventForge code, ops workflows, or GPU fleet boxes. Yo
 
 ---
 
+## Production safety (mandatory)
+
+**https://eventforge.loboforge.com is live production** — LoboForge and other integrators enqueue real customer jobs here. Treat every ECS change as customer-facing.
+
+| Do | Don't |
+|----|-------|
+| Keep `desiredCount=1` always | **Never** set `desiredCount=0` to "restart" — that takes the site fully offline (Cloudflare 530) |
+| Restart with `--desired-count 1 --force-new-deployment` | Stop/delete the service or leave it at 0 without immediately scaling back |
+| Verify `/health` returns 200 after any ECS change | Assume a deploy "completed" if `/health` is down |
+| **Keep old workers until replacements check in and claim jobs** | Terminate the only box handling a capability before new boxes are provisioned |
+
+**Fleet cutover rule:** never destroy/stop a Vast worker that is the **only** box polling a capability (`wan`, `ltx`, `image`, …) until at least one **replacement** has finished provisioning, checked into `/v1/ops/fleet`, and successfully claimed a job (or you've confirmed two+ healthy replacements). Rent first, verify, then retire.
+
+**Correct prod restart** (replaces the running task; ~30–90s gap, then self-recovers):
+
+```bash
+aws ecs update-service --cluster loboforge --service eventforge \
+  --desired-count 1 --force-new-deployment --region us-east-2
+```
+
+If `desiredCount` is already 0, scale back immediately — do not wait for a deploy:
+
+```bash
+aws ecs update-service --cluster loboforge --service eventforge \
+  --desired-count 1 --region us-east-2
+```
+
+---
+
 ## Product model (locked)
 
 | Role | Service | Responsibility |
@@ -200,8 +229,9 @@ Full protocol: `docs/QueueIntegration.md`.
 2. If worker/agent/bootstrap changed → document fleet patch in commit/PR and plan `patch-vast-fleet-eventforge.sh`.
 3. Keep `/health` public; keep ops routes behind ops key.
 4. Remember single-task queue — do not scale EventForge ECS beyond 1 without a shared queue design.
-5. Run `dotnet test event-forge.tests/EventForge.Tests.csproj` for backend changes; rebuild `event-forge/web` for UI.
-6. Do not commit secrets (`.env`, `appsettings.Secrets.json`, ops/worker keys).
+5. **Never set prod `desiredCount=0`** — use `--force-new-deployment` with `--desired-count 1` to restart.
+6. Run `dotnet test event-forge.tests/EventForge.Tests.csproj` for backend changes; rebuild `event-forge/web` for UI.
+7. Do not commit secrets (`.env`, `appsettings.Secrets.json`, ops/worker keys).
 
 ---
 
