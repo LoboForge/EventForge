@@ -92,11 +92,20 @@ if [[ -n "${FORGE_QUEUE_ACCESS_KEY:-}" && -n "${FORGE_QUEUE_SECRET_KEY:-}" ]]; t
 fi
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$FORGE_QUEUE_REGION}"
 
-if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-  echo "ERROR: ForgeQueueWorker IAM required — AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY missing." >&2
-  echo "  Admin: Fleet:ForgeQueue:AccessKey/SecretKey in appsettings.Secrets.json (new rents inject via Vast extra_env)." >&2
-  exit 1
+_gen_queue="${LOBO_GEN_QUEUE:-}"
+if [[ -z "$_gen_queue" ]] && type lobo_fetch_gen_queue_mode &>/dev/null; then
+  lobo_fetch_gen_queue_mode || true
+  _gen_queue="${LOBO_GEN_QUEUE:-}"
 fi
+
+if [[ "$_gen_queue" != "eventforge" ]]; then
+  if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    echo "ERROR: ForgeQueueWorker IAM required — AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY missing." >&2
+    echo "  Admin: Fleet:ForgeQueue:AccessKey/SecretKey in appsettings.Secrets.json (new rents inject via Vast extra_env)." >&2
+    exit 1
+  fi
+fi
+unset _gen_queue
 
 PY="/venv/main/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3)"

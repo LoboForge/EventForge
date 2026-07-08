@@ -188,15 +188,16 @@ public class VastAiClient : IVastAiClient
         if (!IsConfigured) return new() { Ok = false, Error = "Vast.ai API key not configured." };
         if (p.OfferId <= 0) return new() { Ok = false, Error = "Missing offer ID." };
         var mode = VastAiDiskRequirements.NormalizeMode(p.Mode);
-        var allowed = new[] { "image", "video", "music", "all", "ltx-native" };
+        var allowed = new[] { "image", "video", "music", "all", "ltx-native", "wan-native" };
         if (!allowed.Contains(mode))
             return new() { Ok = false, Error = $"Invalid mode '{p.Mode}'." };
 
         var diskGb = VastAiDiskRequirements.ClampRentDiskGb(mode, p.DiskGb);
         var nativeLtx = VastAiDiskRequirements.IsNativeLtxMode(mode);
-        var wanEnabled = mode is not "image" and not "music";
+        var nativeWan = VastAiDiskRequirements.IsNativeWanMode(mode);
+        var wanEnabled = nativeWan || mode is not "image" and not "music";
         var ltx23Enabled = nativeLtx || mode is "all" or "both" or "ltx-native" or "ltx";
-        var musicEnabled = mode is not "image";
+        var musicEnabled = nativeWan ? false : mode is not "image";
         var loboSecret = WorkerBootstrapDefaults.ResolveWorkerSecret(_opts, p.LoboSecret);
         var hfToken = WorkerBootstrapDefaults.ResolveHfToken(_opts, p.HfToken);
         var loboBaseUrl = (p.LoboBaseUrl ?? _opts.AgentScriptBaseUrl).TrimEnd('/');
@@ -220,6 +221,23 @@ public class VastAiClient : IVastAiClient
                 _opts, mode, wanEnabled, ltx23Enabled: true, musicEnabled: false));
             ltxOnstart.Add("nohup bash provision_ltx_native.sh >> /workspace/provision.log 2>&1 &");
             onstart = string.Join("\n", new[] { "#!/bin/bash" }.Concat(ltxOnstart));
+        }
+        else if (nativeWan)
+        {
+            var wanOnstart = new List<string>
+            {
+                "mkdir -p /workspace", "cd /workspace",
+                WorkerBootstrapDefaults.BashCurlAgentFile(scriptPrimary, scriptFallback, "provision_wan_native.sh", "provision_wan_native.sh"),
+                "chmod +x provision_wan_native.sh",
+                $"export LOBO_SECRET={WorkerBootstrapDefaults.BashQuote(loboSecret)}",
+                $"export LOBO_SERVER={WorkerBootstrapDefaults.BashQuote(loboServer)}",
+                $"export LOBO_BASE_URL={WorkerBootstrapDefaults.BashQuote(loboBaseUrl)}",
+                $"export HF_TOKEN={WorkerBootstrapDefaults.BashQuote(hfToken)}",
+            };
+            wanOnstart.AddRange(WorkerBootstrapDefaults.EventForgeOnstartExportLines(
+                _opts, mode, wanEnabled: true, ltx23Enabled: false, musicEnabled: false));
+            wanOnstart.Add("nohup bash provision_wan_native.sh >> /workspace/provision.log 2>&1 &");
+            onstart = string.Join("\n", new[] { "#!/bin/bash" }.Concat(wanOnstart));
         }
         else
         {
@@ -249,7 +267,7 @@ public class VastAiClient : IVastAiClient
         };
         WorkerBootstrapDefaults.ApplyEventForgeVastExtraEnv(env, _opts, mode, wanEnabled, ltx23Enabled, musicEnabled);
         var label = string.IsNullOrWhiteSpace(p.Label)
-            ? (nativeLtx ? "loboforge-ltx" : $"loboforge-{mode}")
+            ? (nativeLtx ? "loboforge-ltx" : nativeWan ? "loboforge-wan-native" : $"loboforge-{mode}")
             : p.Label.Trim();
         env["LOBO_LABEL"] = label;
         env["LOBO_HOSTNAME"] = label;

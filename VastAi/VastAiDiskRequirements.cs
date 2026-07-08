@@ -10,6 +10,7 @@ public static class VastAiDiskRequirements
     public static int RecommendedRentDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 130,
+        "wan-native" => 130,
         "video" => 130,
         "music" => 80,
         "all"   => 150,
@@ -20,6 +21,7 @@ public static class VastAiDiskRequirements
     public static int MinimumRentDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 100,
+        "wan-native" => 100,
         "video" => 80,
         "music" => 50,
         "all"   => 120,
@@ -30,6 +32,7 @@ public static class VastAiDiskRequirements
     public static int MinimumHostDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 120,
+        "wan-native" => 120,
         "video" => 90,
         "music" => 50,
         "all"   => 120,
@@ -51,9 +54,13 @@ public static class VastAiDiskRequirements
         var m = (mode ?? "image").Trim().ToLowerInvariant();
         if (m is "both") return "all";
         if (m is "ltx_native" or "ltxnative") return "ltx-native";
+        if (m is "wan_native" or "wannative") return "wan-native";
         return m;
     }
 
     public static bool IsNativeLtxMode(string? mode) =>
         NormalizeMode(mode) is "ltx-native";
+
+    public static bool IsNativeWanMode(string? mode) =>
+        NormalizeMode(mode) is "wan-native";
 }

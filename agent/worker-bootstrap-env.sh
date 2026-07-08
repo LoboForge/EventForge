@@ -162,6 +162,7 @@ lobo_resolve_forge_queue_capabilities() {
       fi
       ;;
     ltx-native|ltx) caps="ltx" ;;
+    wan-native) caps="wan" ;;
     dolphin) caps="dolphin" ;;
     *) caps="flux-klein" ;;
   esac

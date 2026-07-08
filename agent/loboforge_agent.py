@@ -480,8 +480,27 @@ async def _native_ltx_inventory() -> dict:
         from loboforge_worker.models_sync import build_native_ltx_inventory
         return build_native_ltx_inventory()
     except Exception as ex:
-        log.debug("native inventory unavailable: %s", ex)
+        log.debug("native ltx inventory unavailable: %s", ex)
         return {}
+
+
+async def _native_wan_inventory() -> dict:
+    try:
+        from loboforge_worker.models_sync import build_native_wan_inventory
+        return build_native_wan_inventory()
+    except Exception as ex:
+        log.debug("native wan inventory unavailable: %s", ex)
+        return {}
+
+
+def _is_native_wan_box() -> bool:
+    try:
+        from loboforge_worker.executor_mode import is_native_wan_hostname
+        mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+        return mode == "wan-native" or is_native_wan_hostname()
+    except ImportError:
+        hn = (os.environ.get("LOBO_HOSTNAME") or "").lower()
+        return "wan-native" in hn or hn.startswith("loboforge-wan-")
 
 
 def _start_comfyui_tmux(comfy_dir: Path, port: int) -> None:
@@ -632,6 +651,10 @@ async def get_available_models(comfyui_url: str) -> dict:
     Returns a dict of lists — full paths as ComfyUI knows them.
     """
     if _is_skip_comfy():
+        if _is_native_wan_box():
+            inv = await _native_wan_inventory()
+            if inv:
+                return inv
         inv = await _native_ltx_inventory()
         if inv:
             return inv
@@ -1988,6 +2011,67 @@ def patch_ltx_graph_models(graph: dict, models: dict) -> dict:
 
 # ── Job handler ────────────────────────────────────────────────────────────────
 
+async def _handle_native_wan_job(
+    session: "ServerWsSession",
+    job_uuid: str,
+    graph: dict,
+    send_status,
+    state: dict | None,
+) -> None:
+    """Run Wan 2.2 via Wan-Video/Wan2.2 — no ComfyUI."""
+    from loboforge_worker.inference.wan.runner import run_native_wan_job
+
+    last_pct = [-1]
+
+    async def on_progress(step, total):
+        pct = int(step / total * 100) if total > 0 else 0
+        if pct != last_pct[0]:
+            last_pct[0] = pct
+            try:
+                await send_status("job_progress", step=step, total=total, pct=pct)
+            except Exception:
+                pass
+
+    async def on_activity():
+        if last_pct[0] < 0:
+            return
+        try:
+            await send_status("job_progress", step=last_pct[0], total=100, pct=last_pct[0])
+        except Exception:
+            pass
+
+    loop = asyncio.get_running_loop()
+
+    def on_activity_sync():
+        try:
+            asyncio.run_coroutine_threadsafe(on_activity(), loop).result(timeout=10)
+        except Exception:
+            pass
+
+    try:
+        result = await run_native_wan_job(
+            graph, on_progress=on_progress, on_activity=on_activity_sync
+        )
+    except Exception as ex:
+        log.error("Job %s: native Wan failed — %s", job_uuid, ex)
+        await send_status("job_failed", reason=str(ex))
+        return
+
+    if not result:
+        await send_status("job_failed", reason="native Wan produced no output")
+        return
+
+    file_data, filename = result
+    mime_type = guess_mime(filename)
+    log.info("Job %s: native Wan output %s (%d bytes)", job_uuid, filename, len(file_data))
+
+    ok = await send_file(session, job_uuid, filename, file_data, mime_type)
+    if not ok:
+        await send_status("job_failed", reason="File transfer to server failed")
+        return
+    log.info("Job %s complete (native Wan)", job_uuid)
+
+
 async def _handle_native_ltx_job(
     session: "ServerWsSession",
     job_uuid: str,
@@ -2017,19 +2101,8 @@ async def _handle_native_ltx_job(
         except Exception:
             pass
 
-    loop = asyncio.get_running_loop()
-
-    def on_activity_sync():
-        """Runner tick runs in asyncio task; schedule async lease heartbeat safely."""
-        try:
-            asyncio.run_coroutine_threadsafe(on_activity(), loop).result(timeout=10)
-        except Exception:
-            pass
-
     try:
-        result = await run_native_ltx_job(
-            graph, on_progress=on_progress, on_activity=on_activity_sync
-        )
+        result = await run_native_ltx_job(graph, on_progress=on_progress, on_activity=on_activity)
     except Exception as ex:
         log.error("Job %s: native LTX failed — %s", job_uuid, ex)
         await send_status("job_failed", reason=str(ex))
@@ -2244,6 +2317,13 @@ async def handle_job(session: ServerWsSession, msg: dict, args, state: dict | No
 
     model_lower = (model or "").strip().lower()
     hn_lower = (getattr(args, "hostname", "") or os.environ.get("LOBO_HOSTNAME", "")).lower()
+    use_native_wan = _is_native_wan_box() and (
+        model_lower in ("wan2", "wan2flf", "wan2t2v") or graph_has_wan_nodes(graph)
+    )
+    if use_native_wan:
+        await _handle_native_wan_job(session, job_uuid, graph, send_status, state)
+        return
+
     use_native_ltx = (
         _is_native_executor()
         or hn_lower.startswith("loboforge-ltx")

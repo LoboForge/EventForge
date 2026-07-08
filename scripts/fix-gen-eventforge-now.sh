@@ -115,7 +115,7 @@ for i in json.load(sys.stdin).get('instances', []):
         continue
     if want and iid not in want:
         continue
-    if not want and 'image' not in lab and 'video' not in lab and 'ltx' not in lab:
+    if not want and 'image' not in lab and 'video' not in lab and 'ltx' not in lab and 'wan-native' not in lab:
         continue
     if 'joycaption' in lab or 'caption' in lab:
         continue
@@ -151,6 +151,7 @@ fix_one() {
   if [[ "$label" == loboforge-image ]]; then hn="loboforge-image-${suffix}"
   elif [[ "$label" == loboforge-video ]]; then hn="loboforge-video-${suffix}"
   elif [[ "$label" == loboforge-ltx ]]; then hn="loboforge-ltx-${suffix}"
+  elif [[ "$label" == loboforge-wan-native ]]; then hn="loboforge-wan-native-${suffix}"
   else hn="$(echo "$label" | tr ' ' '-')-${suffix}"
   fi
 
@@ -203,9 +204,11 @@ if [[ "$remote_sha" != "$REPO_AGENT_SHA" ]]; then
   exit 1
 fi
 
-if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-  echo "ERROR: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY must be set in Vast extra_env" >&2
-  exit 1
+if [[ "$PATCH_GEN_QUEUE" != "eventforge" ]]; then
+  if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    echo "ERROR: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY must be set in Vast extra_env" >&2
+    exit 1
+  fi
 fi
 
 ENV_FILE=/workspace/.loboforge-env
@@ -317,7 +320,7 @@ REMOTE
 
   # Background LoRA sync so workers do not defer-loop on missing assets.
   LORA_MODE="all"
-  if [[ "$label" == loboforge-video ]]; then LORA_MODE="video"
+  if [[ "$label" == loboforge-video || "$label" == loboforge-wan-native ]]; then LORA_MODE="video"
   elif [[ "$label" == loboforge-image ]]; then LORA_MODE="image"
   fi
   echo "▶ LoRA sync $id (mode=$LORA_MODE, background)"

@@ -52,7 +52,7 @@ public static class VastEndpoints
         {
             if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
                 return Results.Unauthorized();
-            var minVram = mode switch { "video" or "all" or "ltx-native" => 24, _ => 16 };
+            var minVram = mode switch { "video" or "all" or "ltx-native" or "wan-native" => 24, _ => 16 };
             var q = new SearchQuery
             {
                 MinGpuRamGb = minVram,

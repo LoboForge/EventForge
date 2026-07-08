@@ -128,10 +128,11 @@ public static class WorkerBootstrapDefaults
         hubUrl = (hubUrl ?? "wss://www.loboforge.com").Trim();
         var normMode = VastAiDiskRequirements.NormalizeMode(mode);
         var nativeLtx = VastAiDiskRequirements.IsNativeLtxMode(normMode);
-        var wanEnabled = normMode is not "image" and not "music";
+        var nativeWan = VastAiDiskRequirements.IsNativeWanMode(normMode);
+        var wanEnabled = nativeWan || normMode is not "image" and not "music";
         var ltx23Enabled = nativeLtx || normMode is "all" or "both" or "ltx-native" or "ltx";
-        var musicEnabled = normMode is not "image";
-        var agentFile = nativeLtx ? "provision_ltx_native.sh" : "provision_worker.sh";
+        var musicEnabled = nativeWan ? false : normMode is not "image";
+        var agentFile = nativeLtx ? "provision_ltx_native.sh" : nativeWan ? "provision_wan_native.sh" : "provision_worker.sh";
         var agentCurl = BashCurlAgentFile(scriptPrimary, scriptFallback, agentFile, "-");
 
         var sb = new System.Text.StringBuilder();
@@ -149,6 +150,12 @@ public static class WorkerBootstrapDefaults
             sb.Append(" MODE=ltx-native LOBO_MODE=ltx-native");
             sb.Append(" bash -c ").Append(BashQuote($"{agentCurl} | bash"));
         }
+        else if (nativeWan)
+        {
+            sb.Append(" LOBO_EXECUTOR=native LOBO_SKIP_COMFY=1 LOBO_WAN=1 LOBO_LTX23=0 LOBO_MUSIC=0 LOBO_UNLOAD_MODELS=0");
+            sb.Append(" MODE=wan-native LOBO_MODE=wan-native WAN_MODEL_ROOT=/workspace/wan-models WAN_REPO=/workspace/Wan2.2");
+            sb.Append(" bash -c ").Append(BashQuote($"{agentCurl} | bash"));
+        }
         else
         {
             sb.Append(' ').Append(agentCurl)
@@ -157,7 +164,15 @@ public static class WorkerBootstrapDefaults
         return sb.ToString();
     }
 
-    /// <summary>WorkerKeys map bearer token → worker id (see EventForgeSecretsBinder).</summary>
-    private static string? ResolveFirstWorkerKey(EventForgeOptions opts) =>
-        opts.WorkerKeys.Keys.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k));
+    /// <summary>Production worker bearer token for Vast onstart (not dev placeholder from appsettings.json).</summary>
+    private static string? ResolveFirstWorkerKey(EventForgeOptions opts)
+    {
+        foreach (var k in opts.WorkerKeys.Keys)
+        {
+            if (string.IsNullOrWhiteSpace(k) || k == "wrath-worker-key")
+                continue;
+            return k;
+        }
+        return opts.WorkerKeys.Keys.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k));
+    }
 }

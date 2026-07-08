@@ -91,9 +91,24 @@ Requires `secrets.local.json` with `EventForge.VastAi.ApiKey` and worker key, or
 ## Critical constraints
 
 1. **Single ECS task only** — in-memory job queue. `desiredCount` must stay `1`.
-2. **No overlapping tasks during deploy** — service uses `minimumHealthyPercent=0`, `maximumPercent=100`, AZ rebalancing disabled.
-3. **Circuit breaker** — failed deploys roll back automatically.
-4. **Monorepo must not deploy EventForge** — LoboForge.Studio CI should skip ECS roll for `eventforge` service.
+2. **Production — never scale to zero.** `desiredCount=0` takes https://eventforge.loboforge.com fully offline (real customer jobs). To restart, use `--desired-count 1 --force-new-deployment` (see `AGENTS.md`).
+3. **No overlapping tasks during deploy** — service uses `minimumHealthyPercent=0`, `maximumPercent=100`, AZ rebalancing disabled.
+4. **Circuit breaker** — failed deploys roll back automatically.
+5. **Monorepo must not deploy EventForge** — LoboForge.Studio CI should skip ECS roll for `eventforge` service.
+
+## Emergency restart (prod)
+
+```bash
+# Replace running task — keeps desiredCount=1
+aws ecs update-service --cluster loboforge --service eventforge \
+  --desired-count 1 --force-new-deployment --region us-east-2
+
+# If someone set desiredCount=0, recover immediately:
+aws ecs update-service --cluster loboforge --service eventforge \
+  --desired-count 1 --region us-east-2
+
+curl -sf https://eventforge.loboforge.com/health
+```
 
 ## LoboForge consumer
 

@@ -32,6 +32,7 @@ public static class GenQueueCapabilities
             "all" or "both" => MergeOrdered(AllComfyCapabilities,
                 VideoCapabilities(wanEnabled, ltx23Enabled, musicEnabled)),
             "ltx-native" or "ltx" => [Ltx],
+            "wan-native" => [Wan],
             "dolphin" => [Dolphin],
             _ => [FluxKlein],
         };
