@@ -226,9 +226,7 @@ for line in lines:
 for key, val in keys.items():
     if key not in seen and val != "":
         out.append(f'export {key}="{val}"')
-pathlib.Path(path).write_text("
-".join(out).rstrip() + "
-", encoding="utf-8")
+pathlib.Path(path).write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 PY
 }
 
