@@ -372,6 +372,74 @@ public sealed class JobService
         CancellationToken ct) =>
         await PurgeQueuedForAppAsync(appId, capability, includeInFlight: false, deleteS3: deleteArtifacts, ct);
 
+    public async Task<(int Cancelled, List<string> Ids)> CancelMatchingQueuedAsync(
+        string? appId,
+        string? externalIdContains,
+        string? payloadContains,
+        bool includeInFlight,
+        CancellationToken ct)
+    {
+        var app = string.IsNullOrWhiteSpace(appId) ? null : appId.Trim();
+        var extContains = string.IsNullOrWhiteSpace(externalIdContains) ? null : externalIdContains.Trim();
+        var payloadSub = string.IsNullOrWhiteSpace(payloadContains) ? null : payloadContains.Trim();
+
+        bool Matches(JobRecord j)
+        {
+            if (app != null && !string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase))
+                return false;
+            var payload = j.PayloadJson ?? "";
+            if (payloadSub != null
+                && payload.IndexOf(payloadSub, StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            if (extContains != null)
+            {
+                var externalId = JobPayloadReader.ExtractExternalId(payload);
+                if (externalId == null
+                    || externalId.IndexOf(extContains, StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+            }
+            return true;
+        }
+
+        var removed = _queue.RemoveWhere(j => j.Status == JobStatus.Queued && Matches(j));
+        var ids = removed.Select(j => j.JobId).ToList();
+        if (ids.Count > 0)
+        {
+            await _persist.DeleteJobsAsync(ids, ct);
+            _persist.MarkDirty();
+        }
+
+        var cancelled = removed.Count;
+        if (includeInFlight)
+        {
+            var inFlight = _queue.SnapshotJobs()
+                .Where(j => Matches(j) && j.Status is JobStatus.Leased or JobStatus.Streaming)
+                .ToList();
+            foreach (var job in inFlight)
+            {
+                job.Status = JobStatus.Failed;
+                job.Error = "cancelled_by_ops";
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                _queue.TryUpdate(job);
+                _fleet.OnFail(job.WorkerId, job.WorkerHostname);
+                await EmitLifecycleEventAsync(job, ForgeEventTypes.Failed, "failed", job.WorkerHostname, job.Error, ct);
+                await PublishOpsJobEventAsync("ops.job.cancelled", job, ct);
+                ids.Add(job.JobId);
+                cancelled++;
+            }
+            if (inFlight.Count > 0)
+                _persist.MarkDirty();
+        }
+
+        if (cancelled > 0)
+        {
+            _log.LogInformation(
+                "Ops cancelled {Count} job(s) app={App} external_id_contains={Ext} payload_contains={Payload} include_in_flight={InFlight}",
+                cancelled, app ?? "*", extContains ?? "*", payloadSub ?? "*", includeInFlight);
+        }
+        return (cancelled, ids);
+    }
+
     public async Task<(JobRecord Job, bool Removed)?> CancelJobForAppAsync(
         string jobId,
         string appId,

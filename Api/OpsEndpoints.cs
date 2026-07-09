@@ -158,6 +158,39 @@ public static class OpsEndpoints
             });
         });
 
+        app.MapPost("/v1/ops/jobs/cancel-matching", async (
+            HttpContext ctx,
+            CancelMatchingRequest body,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(body.AppId))
+                return Results.BadRequest(new { error = "app_id required" });
+            if (string.IsNullOrWhiteSpace(body.ExternalIdContains)
+                && string.IsNullOrWhiteSpace(body.PayloadContains))
+                return Results.BadRequest(new { error = "external_id_contains or payload_contains required" });
+
+            var (cancelled, ids) = await jobs.CancelMatchingQueuedAsync(
+                body.AppId,
+                body.ExternalIdContains,
+                body.PayloadContains,
+                body.IncludeInFlight,
+                ct);
+
+            return Results.Ok(new
+            {
+                app_id = body.AppId.Trim(),
+                external_id_contains = body.ExternalIdContains,
+                payload_contains = body.PayloadContains,
+                include_in_flight = body.IncludeInFlight,
+                cancelled,
+                job_ids_sample = ids.Take(20).ToList(),
+            });
+        });
+
         app.MapGet("/v1/ops/jobs/{jobId}", (
             HttpContext ctx,
             string jobId,
@@ -514,6 +547,18 @@ public sealed class RetierJobsRequest
     public string FromTier { get; set; } = "";
     [JsonPropertyName("to_tier")]
     public string ToTier { get; set; } = "";
+}
+
+public sealed class CancelMatchingRequest
+{
+    [JsonPropertyName("app_id")]
+    public string? AppId { get; set; }
+    [JsonPropertyName("external_id_contains")]
+    public string? ExternalIdContains { get; set; }
+    [JsonPropertyName("payload_contains")]
+    public string? PayloadContains { get; set; }
+    [JsonPropertyName("include_in_flight")]
+    public bool IncludeInFlight { get; set; } = true;
 }
 
 public sealed class PauseAppBody
