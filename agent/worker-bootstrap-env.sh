@@ -56,7 +56,7 @@ lobo_fetch_agent_scripts() {
   local base="${LOBO_BASE_URL:-https://www.loboforge.com}"
   mkdir -p "$dir"
   local f
-  for f in loboforge_agent.py loboforge_agent_sqs.py loboforge_agent_common.py wd14_tagger.py; do
+  for f in loboforge_agent.py loboforge_agent_sqs.py loboforge_agent_eventforge.py loboforge_agent_common.py wd14_tagger.py; do
     if ! curl -fsSL -A 'LoboForge-Worker/1.1' "$base/agent/$f" -o "$dir/$f"; then
       [[ "$f" == "wd14_tagger.py" ]] && continue
       echo "ERROR: could not fetch $base/agent/$f" >&2
@@ -83,13 +83,20 @@ lobo_install_forge_queue_sdk() {
   [[ -x "$py" ]] || py="$(command -v python3)"
   local sdk_dir="${FORGE_QUEUE_SDK_DIR:-/workspace/forge-queue/sdk}"
   if [[ ! -f "$sdk_dir/pyproject.toml" ]]; then
-    local base="${LOBO_BASE_URL:-https://www.loboforge.com}"
-    if curl -fsSL -A 'LoboForge-Worker/1.1' "$base/agent/forge-queue-sdk.tar.gz" -o /tmp/forge-queue-sdk.tar.gz 2>/dev/null; then
-      mkdir -p /workspace
-      tar -xzf /tmp/forge-queue-sdk.tar.gz -C /workspace
-      rm -f /tmp/forge-queue-sdk.tar.gz
-      sdk_dir="/workspace/forge-queue/sdk"
-    fi
+    local bases=()
+    [[ -n "${EVENT_FORGE_URL:-}" ]] && bases+=("${EVENT_FORGE_URL%/}")
+    [[ -n "${LOBO_BASE_URL:-}" ]] && bases+=("${LOBO_BASE_URL%/}")
+    [[ ${#bases[@]} -eq 0 ]] && bases=("https://eventforge.loboforge.com" "https://www.loboforge.com")
+    local base
+    for base in "${bases[@]}"; do
+      if curl -fsSL -A 'LoboForge-Worker/1.1' "$base/agent/forge-queue-sdk.tar.gz" -o /tmp/forge-queue-sdk.tar.gz 2>/dev/null; then
+        mkdir -p /workspace
+        tar -xzf /tmp/forge-queue-sdk.tar.gz -C /workspace
+        rm -f /tmp/forge-queue-sdk.tar.gz
+        sdk_dir="/workspace/forge-queue/sdk"
+        break
+      fi
+    done
   fi
   if [[ -f "$sdk_dir/pyproject.toml" ]]; then
     "$py" -m pip install -q -U -e "$sdk_dir" 2>/dev/null || "$py" -m pip install -q -U -e "$sdk_dir"
@@ -148,22 +155,24 @@ lobo_resolve_forge_queue_capabilities() {
     image) caps="flux-klein,flux-klein-edit,zimage,chroma" ;;
     video)
       [[ "${LOBO_WAN:-1}" != "0" ]] && caps="wan"
-      if [[ "${LOBO_LTX23:-0}" == "1" || "${LOBO_MUSIC:-1}" != "0" ]]; then
-        [[ -n "$caps" ]] && caps="${caps},ltx" || caps="ltx"
-      fi
+      [[ "${LOBO_LTX23:-0}" == "1" ]] && { [[ -n "$caps" ]] && caps="${caps},ltx" || caps="ltx"; }
       [[ -z "$caps" ]] && caps="wan"
       ;;
-    music) caps="ltx" ;;
+    music) caps="wan" ;;
     all)
       caps="flux-klein,flux-klein-edit,zimage,chroma"
       [[ "${LOBO_WAN:-1}" != "0" ]] && caps="${caps},wan"
-      if [[ "${LOBO_LTX23:-0}" == "1" || "${LOBO_MUSIC:-1}" != "0" ]]; then
-        caps="${caps},ltx"
-      fi
+      [[ "${LOBO_LTX23:-0}" == "1" ]] && caps="${caps},ltx"
       ;;
     ltx-native|ltx) caps="ltx" ;;
     wan-native) caps="wan" ;;
-    dolphin) caps="dolphin" ;;
+    dolphin|ollama|ollama-chat)
+      if [[ "${LOBO_GEN_QUEUE:-}" == "eventforge" ]]; then
+        caps="ollama-chat"
+      else
+        caps="dolphin"
+      fi
+      ;;
     *) caps="flux-klein" ;;
   esac
   export FORGE_QUEUE_CAPABILITY="$caps"

@@ -10,7 +10,7 @@ public static class WorkerClaimPolicy
 {
     /// <summary>Capabilities that do not require Comfy/model inventory in check-in.</summary>
     private static readonly HashSet<string> InventoryOptionalCapabilities =
-        new(StringComparer.OrdinalIgnoreCase) { "caption", "dolphin" };
+        new(StringComparer.OrdinalIgnoreCase) { "caption", "dolphin", "ollama-chat" };
 
     public static bool IsCheckInFresh(WorkerSnapshot? worker)
     {

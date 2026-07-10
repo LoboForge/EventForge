@@ -54,7 +54,15 @@ def normalize_ollama_url(raw: str) -> str:
     return f"http://{host}"
 
 
-def resolve_http_base() -> str:
+def resolve_hostname(explicit: str | None) -> str:
+    if explicit and explicit.strip():
+        return explicit.strip()
+    label = (os.environ.get("LOBO_LABEL") or "loboforge-ollama").strip()
+    inst = (os.environ.get("LOBO_INSTANCE_ID") or os.environ.get("CONTAINER_ID") or "").strip()
+    if inst:
+        suffix = f"-{inst}"
+        return label if label.endswith(suffix) or label.endswith(inst) else f"{label}{suffix}"
+    return os.uname().nodename
     raw = (os.environ.get("LOBO_BASE_URL") or os.environ.get("LOBOFORGE_AGENT_SERVER") or "").strip().rstrip("/")
     if raw.startswith("wss://"):
         return "https://" + raw[len("wss://") :]
@@ -372,6 +380,7 @@ async def claim_loop(
 
 
 def build_check_in_payload(args: argparse.Namespace, state: dict[str, Any]) -> dict[str, Any]:
+    cap = args.capability
     return {
         "node_uuid": args.node_uuid,
         "hostname": args.hostname,
@@ -381,7 +390,63 @@ def build_check_in_payload(args: argparse.Namespace, state: dict[str, Any]) -> d
         "busy": bool(state.get("current_job")),
         "current_job_uuid": state.get("current_job"),
         "comfy_ok": True,
+        "forge_queue_capabilities": [cap],
+        "claim_ready_capabilities": [cap],
     }
+
+
+def build_lobo_check_in_payload(args: argparse.Namespace, state: dict[str, Any]) -> dict[str, Any]:
+    cap = args.capability
+    return {
+        "node_uuid": args.node_uuid,
+        "hostname": args.hostname,
+        "transport": "eventforge",
+        "forge_queue_capability": cap,
+        "provision_mode": "ollama",
+        "fleet_mode": "ollama",
+        "ollama_url": args.ollama_url,
+        "ollama_models": state.get("ollama_models") or [args.preferred_model],
+        "busy": bool(state.get("current_job")),
+        "current_job_uuid": state.get("current_job"),
+        "comfy_ok": True,
+    }
+
+
+async def lobo_check_in_once(
+    http: aiohttp.ClientSession,
+    args: argparse.Namespace,
+    state: dict[str, Any],
+) -> bool:
+    if not args.secret:
+        return False
+    url = f"{resolve_http_base()}/api/agent/check-in"
+    headers = {
+        "Authorization": f"Bearer {args.secret}",
+        "Content-Type": "application/json",
+    }
+    payload = build_lobo_check_in_payload(args, state)
+    try:
+        async with http.post(url, json=payload, headers=headers) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.warning("LoboForge check-in failed HTTP %s: %s", resp.status, body[:200])
+                return False
+            log.info("LoboForge check-in OK (OllamaNodes presence)")
+            return True
+    except Exception as ex:
+        log.warning("LoboForge check-in error: %s", ex)
+        return False
+
+
+async def lobo_check_in_loop(
+    http: aiohttp.ClientSession,
+    args: argparse.Namespace,
+    state: dict[str, Any],
+) -> None:
+    await lobo_check_in_once(http, args, state)
+    while True:
+        await asyncio.sleep(CHECK_IN_INTERVAL)
+        await lobo_check_in_once(http, args, state)
 
 
 async def api_check_in_once(
@@ -447,6 +512,7 @@ async def run_agent(args: argparse.Namespace) -> None:
             await asyncio.gather(
                 claim_loop(args, state, ef, active_model, models),
                 api_check_in_loop(check_http, args, state),
+                lobo_check_in_loop(check_http, args, state),
             )
         finally:
             await check_http.close()
@@ -459,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capability", default=CAPABILITY)
     p.add_argument("--secret", default=os.environ.get("LOBO_SECRET", os.environ.get("LOBOFORGE_AGENT_SECRET", "")))
     p.add_argument("--node-uuid", default=None)
-    p.add_argument("--hostname", default=os.uname().nodename)
+    p.add_argument("--hostname", default=None)
     p.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
     p.add_argument("--preferred-model", default=PREFERRED_MODEL)
     p.add_argument("--simulate", action="store_true", help="Skip Ollama; emit canned stream (dev)")
@@ -487,6 +553,8 @@ def main() -> None:
     else:
         args.node_uuid = str(uuid.uuid4())
         uuid_file.write_text(args.node_uuid)
+
+    args.hostname = resolve_hostname(args.hostname)
 
     args.ollama_url = normalize_ollama_url(args.ollama_url)
     args.ef_url = args.ef_url.rstrip("/")

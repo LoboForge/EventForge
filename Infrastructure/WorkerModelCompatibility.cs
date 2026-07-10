@@ -20,7 +20,12 @@ public static class WorkerModelCompatibility
         // JoyCaption/Ollama workers do not send Comfy model inventory on check-in.
         if (lower is "joycaption" or "joy-caption" && HostnameIsJoycaption(hn))
             return true;
-        if (lower == "dolphin" && HostnameIsOllama(hn))
+        if (HostnameIsOllama(hn) && (lower == "dolphin" || lower.StartsWith("dolphin", StringComparison.Ordinal)))
+            return true;
+        if (IsOllamaChatCapability(capability)
+            && (lower.StartsWith("dolphin", StringComparison.Ordinal)
+                || lower.StartsWith("loboforge-", StringComparison.Ordinal)
+                || lower.Contains("roleplay", StringComparison.Ordinal)))
             return true;
 
         if (assets.Assets.Count == 0)
@@ -98,9 +103,12 @@ public static class WorkerModelCompatibility
                 "flux-klein-edit" => lower is "flux2klein-edit" or "flux2klein-dual",
                 "zimage" => lower is "zimage" or "lens",
                 "chroma" => lower == "chroma",
-                "wan" => lower.StartsWith("wan", StringComparison.Ordinal),
-                "ltx" => lower.StartsWith("ltx", StringComparison.Ordinal) || lower is "music" or "ace-step",
-                "dolphin" => lower == "dolphin",
+                "wan" => lower.StartsWith("wan", StringComparison.Ordinal) || lower is "music" or "ace-step",
+                "ltx" => lower.StartsWith("ltx", StringComparison.Ordinal),
+                "dolphin" => lower == "dolphin" || lower.StartsWith("dolphin", StringComparison.Ordinal),
+                "ollama-chat" => lower.StartsWith("dolphin", StringComparison.Ordinal)
+                                 || lower.StartsWith("loboforge-", StringComparison.Ordinal)
+                                 || lower.Contains("roleplay", StringComparison.Ordinal),
                 _ => (bool?)null,
             };
             if (expected == false) return false;
@@ -114,7 +122,12 @@ public static class WorkerModelCompatibility
         hostname.Contains("joycaption", StringComparison.OrdinalIgnoreCase);
 
     private static bool HostnameIsOllama(string hostname) =>
-        hostname.Contains("ollama", StringComparison.OrdinalIgnoreCase);
+        hostname.Contains("ollama", StringComparison.OrdinalIgnoreCase)
+        || hostname.Contains("dolphin", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOllamaChatCapability(string? capability) =>
+        string.Equals(capability, "ollama-chat", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(capability, "dolphin", StringComparison.OrdinalIgnoreCase);
 
     private static bool HostnameIsImageOnly(string hostname)
     {

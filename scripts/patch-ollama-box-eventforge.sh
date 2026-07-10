@@ -49,6 +49,11 @@ for kv in LOBO_SECRET LOBO_BASE_URL EVENT_FORGE_URL EVENT_FORGE_WORKER_KEY; do
   [[ -n "$val" ]] || continue
   grep -q "^export ${kv}=" "$ENV_FILE" 2>/dev/null && sed -i "s|^export ${kv}=.*|export ${kv}=\"${val}\"|" "$ENV_FILE" || echo "export ${kv}=\"${val}\"" >> "$ENV_FILE"
 done
+grep -q "^export EVENT_FORGE_CAPABILITY=" "$ENV_FILE" 2>/dev/null && sed -i 's|^export EVENT_FORGE_CAPABILITY=.*|export EVENT_FORGE_CAPABILITY="ollama-chat"|' "$ENV_FILE" || echo 'export EVENT_FORGE_CAPABILITY="ollama-chat"' >> "$ENV_FILE"
+grep -q "^export FORGE_QUEUE_CAPABILITY=" "$ENV_FILE" 2>/dev/null && sed -i 's|^export FORGE_QUEUE_CAPABILITY=.*|export FORGE_QUEUE_CAPABILITY="ollama-chat"|' "$ENV_FILE" || echo 'export FORGE_QUEUE_CAPABILITY="ollama-chat"' >> "$ENV_FILE"
+grep -q "^export LOBO_GEN_QUEUE=" "$ENV_FILE" 2>/dev/null && sed -i 's|^export LOBO_GEN_QUEUE=.*|export LOBO_GEN_QUEUE="eventforge"|' "$ENV_FILE" || echo 'export LOBO_GEN_QUEUE="eventforge"' >> "$ENV_FILE"
+grep -q "^export LOBO_LABEL=" "$ENV_FILE" 2>/dev/null || echo 'export LOBO_LABEL="loboforge-ollama"' >> "$ENV_FILE"
+grep -q "^export LOBO_INSTANCE_ID=" "$ENV_FILE" 2>/dev/null || echo 'export LOBO_INSTANCE_ID="42600549"' >> "$ENV_FILE"
 "$PY" -m pip install -q -U aiohttp
 chmod +x /workspace/vast-ollama-eventforge-agent-loop.sh
 tmux kill-session -t loboforge-ollama-agent 2>/dev/null || true
