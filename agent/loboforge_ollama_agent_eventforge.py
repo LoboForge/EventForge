@@ -63,6 +63,9 @@ def resolve_hostname(explicit: str | None) -> str:
         suffix = f"-{inst}"
         return label if label.endswith(suffix) or label.endswith(inst) else f"{label}{suffix}"
     return os.uname().nodename
+
+
+def resolve_http_base() -> str:
     raw = (os.environ.get("LOBO_BASE_URL") or os.environ.get("LOBOFORGE_AGENT_SERVER") or "").strip().rstrip("/")
     if raw.startswith("wss://"):
         return "https://" + raw[len("wss://") :]
