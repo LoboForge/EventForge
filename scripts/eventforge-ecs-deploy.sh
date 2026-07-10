@@ -62,6 +62,9 @@ NEW_ARN=$(aws ecs register-task-definition \
 rm -f "$TMP"
 echo "  Registered: $NEW_ARN"
 
+step "Pre-deploy queue persist (flush + guarded S3 backup)"
+bash "$(dirname "$0")/eventforge-pre-deploy-persist.sh"
+
 step "Update service"
 aws ecs update-service \
   --cluster "$CLUSTER" --service "$SERVICE" \

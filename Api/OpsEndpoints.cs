@@ -1,8 +1,10 @@
 using EventForge.Auth;
 using EventForge.Core;
 using EventForge.Infrastructure;
+using EventForge.Persistence;
 using EventForge.Queue;
 using EventForge.Services;
+using EventForge.Storage;
 using EventForge.WebSocket;
 using System.Text.Json.Serialization;
 
@@ -215,6 +217,36 @@ public static class OpsEndpoints
                 limit = body.Limit,
                 requeued,
                 job_ids_sample = ids.Take(20).ToList(),
+            });
+        });
+
+        app.MapPost("/v1/ops/persist/flush-backup", async (
+            HttpContext ctx,
+            WriteBehindPersistence persist,
+            ISqliteS3Persistence sqliteS3,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+
+            await persist.FlushAsync(ct);
+            var backup = await sqliteS3.BackupAsync(ct);
+            return Results.Ok(new
+            {
+                jobs_total = queue.TotalCount,
+                jobs_queued = queue.QueuedCount,
+                pending_writes = persist.PendingWrites,
+                cache_loaded = persist.IsLoaded,
+                backup_uploaded = backup.Uploaded,
+                backup_skipped = backup.Skipped,
+                backup_skip_reason = backup.SkipReason,
+                local_job_count = backup.LocalJobCount,
+                remote_job_count = backup.RemoteJobCount,
+                local_bytes = backup.LocalBytes,
+                remote_bytes = backup.RemoteBytes,
+                dated_backup_key = backup.DatedBackupKey,
             });
         });
 

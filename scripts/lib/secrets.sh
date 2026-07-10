@@ -28,7 +28,22 @@ PY
 }
 
 export EVENT_FORGE_URL="${EVENT_FORGE_URL:-$(read_json EventForge.PublicUrl)}"
+export EVENT_FORGE_OPS_KEY="${EVENT_FORGE_OPS_KEY:-$(read_json EventForge.OpsKey)}"
 export EVENT_FORGE_WORKER_KEY="${EVENT_FORGE_WORKER_KEY:-$(read_json EventForge.WorkerKey)}"
 export VAST_API_KEY="${VAST_API_KEY:-$(read_json EventForge.VastAi.ApiKey)}"
 export LOBO_BASE_URL="${LOBO_BASE_URL:-$(read_json LoboForge.BaseUrl)}"
 export LOBO_SECRET="${LOBO_SECRET:-$(read_json LoboForge.WorkersSecret)}"
+
+if [[ -z "${EVENT_FORGE_OPS_KEY:-}" && -n "${APP_SECRETS_JSON:-}" ]]; then
+  EVENT_FORGE_OPS_KEY="$(python3 - <<'PY'
+import json, os
+raw = os.environ.get("APP_SECRETS_JSON", "")
+if not raw.strip():
+    raise SystemExit(0)
+d = json.loads(raw)
+ef = d.get("EventForge") or d
+print(ef.get("OpsKey") or "")
+PY
+)"
+  export EVENT_FORGE_OPS_KEY
+fi

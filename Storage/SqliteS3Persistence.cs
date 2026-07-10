@@ -12,7 +12,7 @@ public interface ISqliteS3Persistence
 {
     string DatabasePath { get; }
     Task RestoreOnStartupAsync(CancellationToken ct = default);
-    Task BackupAsync(CancellationToken ct = default);
+    Task<SqliteS3BackupResult> BackupAsync(CancellationToken ct = default);
 }
 
 public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
@@ -51,12 +51,22 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
             return;
         }
 
+        var restoreKey = await PickBestRestoreKeyAsync(bucket, key, ct);
+        if (restoreKey == null)
+        {
+            _log.LogInformation("No trusted EventForge SQLite snapshot in s3://{Bucket}/{Prefix}; starting fresh", bucket, key);
+            return;
+        }
+
         try
         {
-            using var resp = await _s3.GetObjectAsync(bucket, key, ct);
+            using var resp = await _s3!.GetObjectAsync(bucket, restoreKey, ct);
             await using var fs = File.Create(DatabasePath);
             await resp.ResponseStream.CopyToAsync(fs, ct);
-            _log.LogInformation("EventForge SQLite restored from s3://{Bucket}/{Key}", bucket, key);
+            var jobs = await SqliteStoreStats.CountJobsAsync(DatabasePath, ct);
+            _log.LogInformation(
+                "EventForge SQLite restored from s3://{Bucket}/{Key} ({Jobs} jobs, {Bytes} bytes)",
+                bucket, restoreKey, jobs, SqliteStoreStats.FileBytes(DatabasePath));
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -68,16 +78,47 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
         }
     }
 
-    public async Task BackupAsync(CancellationToken ct = default)
+    public async Task<SqliteS3BackupResult> BackupAsync(CancellationToken ct = default)
     {
-        if (_s3 == null) return;
-        if (!File.Exists(DatabasePath)) return;
+        if (_s3 == null || !File.Exists(DatabasePath))
+        {
+            return new SqliteS3BackupResult
+            {
+                Skipped = true,
+                SkipReason = "s3_disabled_or_missing_db",
+                LocalBytes = SqliteStoreStats.FileBytes(DatabasePath),
+            };
+        }
 
         var bucket = _opts.S3.Bucket.Trim();
         var key = _opts.S3.Key.Trim().TrimStart('/');
-        if (bucket.Length == 0 || key.Length == 0) return;
+        if (bucket.Length == 0 || key.Length == 0)
+        {
+            return new SqliteS3BackupResult { Skipped = true, SkipReason = "s3_not_configured" };
+        }
+
+        var localJobs = await SqliteStoreStats.CountJobsAsync(DatabasePath, ct);
+        var localBytes = SqliteStoreStats.FileBytes(DatabasePath);
+        var (remoteBytes, remoteJobs) = await InspectRemoteAsync(bucket, key, ct);
+
+        if (SqliteBackupPolicy.ShouldRefuseOverwrite(localJobs, localBytes, remoteJobs, remoteBytes))
+        {
+            var reason =
+                $"local_jobs={localJobs} local_bytes={localBytes} remote_jobs={remoteJobs} remote_bytes={remoteBytes}";
+            _log.LogWarning("EventForge refusing S3 backup upload — snapshot looks like a destructive shrink ({Reason})", reason);
+            return new SqliteS3BackupResult
+            {
+                Skipped = true,
+                SkipReason = reason,
+                LocalJobCount = localJobs,
+                RemoteJobCount = remoteJobs,
+                LocalBytes = localBytes,
+                RemoteBytes = remoteBytes,
+            };
+        }
 
         var tempPath = DatabasePath + ".backup";
+        string? datedKey = null;
         try
         {
             await using (var source = new SqliteConnection($"Data Source={DatabasePath}"))
@@ -88,6 +129,9 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
                 source.BackupDatabase(dest);
             }
 
+            if (remoteBytes > 0)
+                datedKey = await CopyRemoteToDatedBackupAsync(bucket, key, ct);
+
             await using var uploadStream = File.OpenRead(tempPath);
             await _s3.PutObjectAsync(new PutObjectRequest
             {
@@ -96,11 +140,33 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
                 InputStream = uploadStream,
                 ContentType = "application/x-sqlite3",
             }, ct);
-            _log.LogDebug("EventForge SQLite backed up to s3://{Bucket}/{Key}", bucket, key);
+
+            _log.LogInformation(
+                "EventForge SQLite backed up to s3://{Bucket}/{Key} ({Jobs} jobs, {Bytes} bytes)",
+                bucket, key, localJobs, localBytes);
+
+            return new SqliteS3BackupResult
+            {
+                Uploaded = true,
+                LocalJobCount = localJobs,
+                RemoteJobCount = remoteJobs,
+                LocalBytes = localBytes,
+                RemoteBytes = remoteBytes,
+                DatedBackupKey = datedKey,
+            };
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "EventForge S3 backup failed");
+            return new SqliteS3BackupResult
+            {
+                Skipped = true,
+                SkipReason = ex.Message,
+                LocalJobCount = localJobs,
+                RemoteJobCount = remoteJobs,
+                LocalBytes = localBytes,
+                RemoteBytes = remoteBytes,
+            };
         }
         finally
         {
@@ -108,6 +174,126 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
             {
                 try { File.Delete(tempPath); } catch { /* ignore */ }
             }
+        }
+    }
+
+    private async Task<string?> PickBestRestoreKeyAsync(string bucket, string primaryKey, CancellationToken ct)
+    {
+        var prefix = primaryKey.Contains('/') ? primaryKey[..(primaryKey.LastIndexOf('/') + 1)] : "";
+        var candidates = new List<(string Key, long Size)>();
+
+        try
+        {
+            string? token = null;
+            do
+            {
+                var resp = await _s3!.ListObjectsV2Async(new ListObjectsV2Request
+                {
+                    BucketName = bucket,
+                    Prefix = prefix + "store.db",
+                    ContinuationToken = token,
+                }, ct);
+                foreach (var obj in resp.S3Objects)
+                {
+                    if (obj.Key is { Length: > 0 } k && obj.Size > 0)
+                        candidates.Add((k, obj.Size));
+                }
+                token = resp.IsTruncated ? resp.NextContinuationToken : null;
+            } while (token != null);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "EventForge S3 list for restore candidates failed; falling back to primary key");
+            candidates.Add((primaryKey, 0));
+        }
+
+        if (candidates.Count == 0)
+            return null;
+
+        foreach (var (candidateKey, size) in candidates.OrderByDescending(c => c.Size))
+        {
+            if (size > 0 && !SqliteBackupPolicy.IsTrustedSnapshot(0, size))
+                continue;
+
+            if (size == 0)
+            {
+                var jobs = await InspectRemoteJobsAsync(bucket, candidateKey, ct);
+                if (!SqliteBackupPolicy.IsTrustedSnapshot(jobs, 0))
+                    continue;
+            }
+
+            if (!string.Equals(candidateKey, primaryKey, StringComparison.Ordinal))
+            {
+                _log.LogWarning(
+                    "EventForge primary S3 snapshot untrusted; restoring from s3://{Bucket}/{Key} ({Bytes} bytes) instead",
+                    bucket, candidateKey, size);
+            }
+            return candidateKey;
+        }
+
+        return null;
+    }
+
+    private async Task<(long Bytes, int Jobs)> InspectRemoteAsync(string bucket, string key, CancellationToken ct)
+    {
+        try
+        {
+            var head = await _s3!.GetObjectMetadataAsync(bucket, key, ct);
+            var bytes = head.ContentLength;
+            var jobs = bytes >= SqliteBackupPolicy.MinTrustedBytes
+                ? await InspectRemoteJobsAsync(bucket, key, ct)
+                : 0;
+            return (bytes, jobs);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return (0, 0);
+        }
+    }
+
+    private async Task<int> InspectRemoteJobsAsync(string bucket, string key, CancellationToken ct)
+    {
+        var temp = Path.GetTempFileName();
+        try
+        {
+            using var resp = await _s3!.GetObjectAsync(bucket, key, ct);
+            await using var fs = File.Create(temp);
+            await resp.ResponseStream.CopyToAsync(fs, ct);
+            return await SqliteStoreStats.CountJobsAsync(temp, ct);
+        }
+        catch
+        {
+            return 0;
+        }
+        finally
+        {
+            if (File.Exists(temp))
+            {
+                try { File.Delete(temp); } catch { /* ignore */ }
+            }
+        }
+    }
+
+    private async Task<string?> CopyRemoteToDatedBackupAsync(string bucket, string key, CancellationToken ct)
+    {
+        try
+        {
+            var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss");
+            var datedKey = key + ".backup-" + stamp;
+            await _s3!.CopyObjectAsync(new CopyObjectRequest
+            {
+                SourceBucket = bucket,
+                SourceKey = key,
+                DestinationBucket = bucket,
+                DestinationKey = datedKey,
+            }, ct);
+            _log.LogInformation("EventForge copied s3://{Bucket}/{Source} → {Dest} before upload", bucket, key, datedKey);
+            return datedKey;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "EventForge dated S3 backup copy failed (continuing with upload)");
+            return null;
         }
     }
 
