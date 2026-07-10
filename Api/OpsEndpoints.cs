@@ -220,7 +220,7 @@ public static class OpsEndpoints
             });
         });
 
-        app.MapPost("/v1/ops/persist/flush-backup", async (
+        app.MapPost("/v1/ops/jobs/flush-backup", async (
             HttpContext ctx,
             WriteBehindPersistence persist,
             ISqliteS3Persistence sqliteS3,

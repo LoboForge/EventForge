@@ -28,7 +28,7 @@ step() { echo "▶ $*"; }
 die() { echo "✗ $*" >&2; exit 1; }
 
 step "Flush in-memory queue + S3 backup at ${BASE_URL}"
-HTTP_CODE=$(curl -sS --max-time 120 -o /tmp/ef-flush-backup.json -w "%{http_code}" -X POST "${BASE_URL}/v1/ops/persist/flush-backup" \
+  HTTP_CODE=$(curl -sS --max-time 120 -o /tmp/ef-flush-backup.json -w "%{http_code}" -X POST "${BASE_URL}/v1/ops/jobs/flush-backup" \
   -H "X-EventForge-Ops-Key: ${OPS_KEY}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
