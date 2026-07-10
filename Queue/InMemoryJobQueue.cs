@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EventForge.Core;
+using EventForge.Infrastructure;
 
 namespace EventForge.Queue;
 
@@ -235,6 +236,36 @@ public sealed class InMemoryJobQueue
         }
     }
 
+    /// <summary>Move matching failed jobs back to the queue tail for retry.</summary>
+    public IReadOnlyList<JobRecord> RequeueFailedWhere(Func<JobRecord, bool> predicate, int? limit = null)
+    {
+        lock (_lock)
+        {
+            var requeued = new List<JobRecord>();
+            foreach (var job in _jobs.Values.OrderBy(j => j.CompletedAt ?? j.CreatedAt))
+            {
+                if (limit.HasValue && requeued.Count >= limit.Value) break;
+                if (job.Status != JobStatus.Failed) continue;
+                if (!predicate(job)) continue;
+
+                job.Status = JobStatus.Queued;
+                job.WorkerId = null;
+                job.WorkerHostname = null;
+                job.LeasedAt = null;
+                job.LeasedUntil = null;
+                job.CompletedAt = null;
+                job.Error = null;
+                job.OutputUrl = null;
+                job.OutputContentType = null;
+                job.TextReply = null;
+                if (!_queuedOrder.Contains(job.JobId))
+                    _queuedOrder.Add(job.JobId);
+                requeued.Add(Clone(job));
+            }
+            return requeued;
+        }
+    }
+
     /// <summary>Reassign matching jobs to a new consumer app id (in-memory only).</summary>
     public int ReassignAppIdWhere(Func<JobRecord, bool> predicate, string newAppId)
     {
@@ -247,6 +278,26 @@ public sealed class InMemoryJobQueue
             {
                 if (!_jobs.TryGetValue(id, out var job) || !predicate(job)) continue;
                 _jobs[id] = CloneWithAppId(job, app);
+                count++;
+            }
+            return count;
+        }
+    }
+
+    /// <summary>Queued music used to be tagged capability=ltx; move to wan (video queue).</summary>
+    public int RemapLegacyMusicCapabilities()
+    {
+        lock (_lock)
+        {
+            var count = 0;
+            foreach (var id in _jobs.Keys.ToList())
+            {
+                if (!_jobs.TryGetValue(id, out var job)) continue;
+                if (job.Status != JobStatus.Queued) continue;
+                if (!string.Equals(job.Capability, "ltx", StringComparison.OrdinalIgnoreCase)) continue;
+                var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
+                if (model is not ("music" or "ace-step")) continue;
+                _jobs[id] = CloneWithCapability(job, "wan");
                 count++;
             }
             return count;
@@ -319,6 +370,28 @@ public sealed class InMemoryJobQueue
         JobId = j.JobId,
         AppId = appId,
         Capability = j.Capability,
+        Tier = j.Tier,
+        QueuePriority = j.QueuePriority,
+        Kind = j.Kind,
+        PayloadJson = j.PayloadJson,
+        Status = j.Status,
+        WorkerId = j.WorkerId,
+        WorkerHostname = j.WorkerHostname,
+        CreatedAt = j.CreatedAt,
+        LeasedAt = j.LeasedAt,
+        LeasedUntil = j.LeasedUntil,
+        CompletedAt = j.CompletedAt,
+        OutputUrl = j.OutputUrl,
+        OutputContentType = j.OutputContentType,
+        TextReply = j.TextReply,
+        Error = j.Error,
+    };
+
+    private static JobRecord CloneWithCapability(JobRecord j, string capability) => new()
+    {
+        JobId = j.JobId,
+        AppId = j.AppId,
+        Capability = capability,
         Tier = j.Tier,
         QueuePriority = j.QueuePriority,
         Kind = j.Kind,

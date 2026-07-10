@@ -374,18 +374,22 @@ public sealed class JobService
 
     public async Task<(int Cancelled, List<string> Ids)> CancelMatchingQueuedAsync(
         string? appId,
+        string? capability,
         string? externalIdContains,
         string? payloadContains,
         bool includeInFlight,
         CancellationToken ct)
     {
         var app = string.IsNullOrWhiteSpace(appId) ? null : appId.Trim();
+        var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
         var extContains = string.IsNullOrWhiteSpace(externalIdContains) ? null : externalIdContains.Trim();
         var payloadSub = string.IsNullOrWhiteSpace(payloadContains) ? null : payloadContains.Trim();
 
         bool Matches(JobRecord j)
         {
             if (app != null && !string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (cap != null && !string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase))
                 return false;
             var payload = j.PayloadJson ?? "";
             if (payloadSub != null
@@ -438,6 +442,44 @@ public sealed class JobService
                 cancelled, app ?? "*", extContains ?? "*", payloadSub ?? "*", includeInFlight);
         }
         return (cancelled, ids);
+    }
+
+    public Task<(int Requeued, List<string> Ids)> RequeueFailedAsync(
+        string? capability,
+        string? appId,
+        string? errorContains,
+        int? limit,
+        CancellationToken ct)
+    {
+        var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
+        var app = string.IsNullOrWhiteSpace(appId) ? null : appId.Trim();
+        var errSub = string.IsNullOrWhiteSpace(errorContains) ? null : errorContains.Trim();
+        if (limit is < 1)
+            limit = null;
+
+        bool Matches(JobRecord j)
+        {
+            if (j.Status != JobStatus.Failed) return false;
+            if (cap != null && !string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (app != null && !string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (errSub != null
+                && (j.Error ?? "").IndexOf(errSub, StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            return true;
+        }
+
+        var requeued = _queue.RequeueFailedWhere(Matches, limit);
+        var ids = requeued.Select(j => j.JobId).ToList();
+        if (ids.Count > 0)
+        {
+            _persist.MarkDirty();
+            _log.LogInformation(
+                "Ops requeued {Count} failed job(s) capability={Cap} app={App} error_contains={Err}",
+                ids.Count, cap ?? "*", app ?? "*", errSub ?? "*");
+        }
+        return Task.FromResult((ids.Count, ids));
     }
 
     public async Task<(JobRecord Job, bool Removed)?> CancelJobForAppAsync(

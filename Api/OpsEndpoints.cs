@@ -169,12 +169,10 @@ public static class OpsEndpoints
                 return Results.Unauthorized();
             if (string.IsNullOrWhiteSpace(body.AppId))
                 return Results.BadRequest(new { error = "app_id required" });
-            if (string.IsNullOrWhiteSpace(body.ExternalIdContains)
-                && string.IsNullOrWhiteSpace(body.PayloadContains))
-                return Results.BadRequest(new { error = "external_id_contains or payload_contains required" });
 
             var (cancelled, ids) = await jobs.CancelMatchingQueuedAsync(
                 body.AppId,
+                body.Capability,
                 body.ExternalIdContains,
                 body.PayloadContains,
                 body.IncludeInFlight,
@@ -183,10 +181,39 @@ public static class OpsEndpoints
             return Results.Ok(new
             {
                 app_id = body.AppId.Trim(),
+                capability = body.Capability,
                 external_id_contains = body.ExternalIdContains,
                 payload_contains = body.PayloadContains,
-                include_in_flight = body.IncludeInFlight,
                 cancelled,
+                include_in_flight = body.IncludeInFlight,
+                job_ids_sample = ids.Take(20).ToList(),
+            });
+        });
+
+        app.MapPost("/v1/ops/jobs/requeue-failed", async (
+            HttpContext ctx,
+            RequeueFailedRequest body,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+
+            var (requeued, ids) = await jobs.RequeueFailedAsync(
+                body.Capability,
+                body.AppId,
+                body.ErrorContains,
+                body.Limit,
+                ct);
+
+            return Results.Ok(new
+            {
+                capability = body.Capability,
+                app_id = body.AppId,
+                error_contains = body.ErrorContains,
+                limit = body.Limit,
+                requeued,
                 job_ids_sample = ids.Take(20).ToList(),
             });
         });
@@ -549,20 +576,25 @@ public sealed class RetierJobsRequest
     public string ToTier { get; set; } = "";
 }
 
-public sealed class CancelMatchingRequest
-{
-    [JsonPropertyName("app_id")]
-    public string? AppId { get; set; }
-    [JsonPropertyName("external_id_contains")]
-    public string? ExternalIdContains { get; set; }
-    [JsonPropertyName("payload_contains")]
-    public string? PayloadContains { get; set; }
-    [JsonPropertyName("include_in_flight")]
-    public bool IncludeInFlight { get; set; } = true;
-}
-
 public sealed class PauseAppBody
 {
     public string? Reason { get; set; }
     public string? PausedBy { get; set; }
+}
+
+public sealed class CancelMatchingRequest
+{
+    public string? AppId { get; set; }
+    public string? Capability { get; set; }
+    public string? ExternalIdContains { get; set; }
+    public string? PayloadContains { get; set; }
+    public bool IncludeInFlight { get; set; }
+}
+
+public sealed class RequeueFailedRequest
+{
+    public string? Capability { get; set; }
+    public string? AppId { get; set; }
+    public string? ErrorContains { get; set; }
+    public int? Limit { get; set; }
 }
