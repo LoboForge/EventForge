@@ -15,12 +15,6 @@ public sealed class WsConnectionManager
     public void Add(WsSession session)
     {
         var appSessions = _byApp.GetOrAdd(session.AppId, _ => new());
-        foreach (var existing in appSessions.Values.ToArray())
-        {
-            if (existing.Id == session.Id) continue;
-            appSessions.TryRemove(existing.Id, out _);
-            _ = existing.CloseAsync("replaced by new connection");
-        }
         appSessions.TryAdd(session.Id, session);
     }
 

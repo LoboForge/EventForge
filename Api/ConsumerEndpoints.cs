@@ -188,6 +188,7 @@ public static class ConsumerEndpoints
         completed_at = j.CompletedAt?.ToString("O"),
         error = j.Error,
         output_url = j.OutputUrl,
+        text_reply = j.TextReply,
     };
 }
 
