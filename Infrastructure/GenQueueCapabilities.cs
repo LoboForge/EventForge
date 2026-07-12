@@ -17,6 +17,24 @@ public static class GenQueueCapabilities
     public static readonly IReadOnlyList<string> AllComfyCapabilities =
         [FluxKlein, FluxKleinEdit, ZImage, Chroma, Wan, Ltx];
 
+    /// <summary>EventForge queue capability for a gen model key (keep in sync with LoboForge GenQueueCapabilities.ForModel).</summary>
+    public static string ForModel(string? model)
+    {
+        var m = (model ?? "").Trim().ToLowerInvariant();
+        if (m is "flux2klein-edit" or "flux2klein-dual") return FluxKleinEdit;
+        if (m.StartsWith("flux", StringComparison.Ordinal) || m is "storyboard") return FluxKlein;
+        if (m is "wan2" or "wan2flf" or "wan2t2v" or "wan" || m.StartsWith("wan", StringComparison.Ordinal))
+            return Wan;
+        if (m.StartsWith("ltx23", StringComparison.Ordinal) || m is "ltx23") return Ltx;
+        if (m is "zimage" or "lens") return ZImage;
+        if (m is "chroma") return Chroma;
+        // ACE-Step music rides the video (wan) queue — not the LTX23 video queue.
+        if (m is "music" or "ace-step") return Wan;
+        if (m is "joycaption" or "joy-caption") return "caption";
+        if (m is "dolphin") return Dolphin;
+        return FluxKlein;
+    }
+
     public static IReadOnlyList<string> ForProvisionMode(
         string? mode,
         bool wanEnabled = true,
@@ -27,10 +45,10 @@ public static class GenQueueCapabilities
         return norm switch
         {
             "image" => ImageCapabilities,
-            "video" => VideoCapabilities(wanEnabled, ltx23Enabled, musicEnabled),
-            "music" => [Ltx],
+            "video" => VideoCapabilities(wanEnabled, ltx23Enabled),
+            "music" => [Wan],
             "all" or "both" => MergeOrdered(AllComfyCapabilities,
-                VideoCapabilities(wanEnabled, ltx23Enabled, musicEnabled)),
+                VideoCapabilities(wanEnabled, ltx23Enabled)),
             "ltx-native" or "ltx" => [Ltx],
             "wan-native" => [Wan],
             "dolphin" => [Dolphin],
@@ -54,11 +72,11 @@ public static class GenQueueCapabilities
         return m.Length == 0 ? "all" : m;
     }
 
-    private static IReadOnlyList<string> VideoCapabilities(bool wanEnabled, bool ltx23Enabled, bool musicEnabled)
+    private static IReadOnlyList<string> VideoCapabilities(bool wanEnabled, bool ltx23Enabled)
     {
         var caps = new List<string>(2);
         if (wanEnabled) caps.Add(Wan);
-        if (ltx23Enabled || musicEnabled) caps.Add(Ltx);
+        if (ltx23Enabled) caps.Add(Ltx);
         if (caps.Count == 0) caps.Add(Wan);
         return caps;
     }

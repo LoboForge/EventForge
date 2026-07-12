@@ -29,7 +29,6 @@ PROVISION_LOG = Path("/workspace/model-provision.log")
 TMUX_SESSION = "loboforge-agent"
 PROVISION_SESSION = "loboforge-provision"
 DEFAULT_PY = "/venv/main/bin/python3"
-# HF_TOKEN from Vast extra_env — never commit tokens to git.
 
 
 def resolve_hf_token(explicit: str = "") -> str:
@@ -156,6 +155,31 @@ def _aws_creds_present() -> bool:
 
 def _install_forge_queue_sdk(py: str) -> None:
     sdk_dir = Path(os.environ.get("FORGE_QUEUE_SDK_DIR", "/workspace/forge-queue/sdk"))
+    if not sdk_dir.joinpath("pyproject.toml").is_file():
+        bases: list[str] = []
+        for key in ("EVENT_FORGE_URL", "LOBO_BASE_URL"):
+            raw = (os.environ.get(key) or "").strip().rstrip("/")
+            if raw and raw not in bases:
+                bases.append(raw)
+        if not bases:
+            bases = ["https://eventforge.loboforge.com", "https://www.loboforge.com"]
+        tar_path = Path("/tmp/forge-queue-sdk.tar.gz")
+        for base in bases:
+            subprocess.run(
+                [
+                    "curl", "-fsSL", "-A", "LoboForge-Worker/1.1",
+                    f"{base}/agent/forge-queue-sdk.tar.gz",
+                    "-o", str(tar_path),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+            if tar_path.is_file() and tar_path.stat().st_size > 100:
+                subprocess.run(["tar", "-xzf", str(tar_path), "-C", "/workspace"], check=False)
+                tar_path.unlink(missing_ok=True)
+                break
+            tar_path.unlink(missing_ok=True)
     if sdk_dir.joinpath("pyproject.toml").is_file():
         subprocess.run([py, "-m", "pip", "install", "-q", "-U", "-e", str(sdk_dir)], check=False)
 
@@ -177,6 +201,9 @@ def launch_agent_tmux(args: BootstrapArgs, *, hostname: str) -> dict:
     subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], capture_output=True, check=False)
 
     if use_ef:
+        _install_forge_queue_sdk(py)
+        native_mode = (args.provision_mode or "").strip().lower() in ("wan-native", "ltx-native")
+        skip_comfy = native_mode or os.environ.get("LOBO_SKIP_COMFY", "").strip() in ("1", "true", "yes")
         cmd_parts = [
             py,
             str(agent_script),
@@ -184,11 +211,16 @@ def launch_agent_tmux(args: BootstrapArgs, *, hostname: str) -> dict:
             args.secret,
             "--hostname",
             hostname,
-            "--comfyui-http",
-            args.comfyui_http,
-            "--comfyui-ws",
-            args.comfyui_ws,
         ]
+        if not skip_comfy:
+            cmd_parts.extend(
+                [
+                    "--comfyui-http",
+                    args.comfyui_http,
+                    "--comfyui-ws",
+                    args.comfyui_ws,
+                ]
+            )
     elif use_sqs:
         if not _aws_creds_present():
             return {"ok": False, "error": "AWS IAM creds missing (ForgeQueueWorker policy)"}
@@ -267,6 +299,17 @@ def launch_agent_tmux(args: BootstrapArgs, *, hostname: str) -> dict:
                 queue_exports += f'export AWS_ACCESS_KEY_ID="{os.environ["AWS_ACCESS_KEY_ID"]}"; '
             if os.environ.get("AWS_SECRET_ACCESS_KEY"):
                 queue_exports += f'export AWS_SECRET_ACCESS_KEY="{os.environ["AWS_SECRET_ACCESS_KEY"]}"; '
+    mode = (args.provision_mode or "").strip().lower()
+    if mode == "wan-native":
+        queue_exports += (
+            'export LOBO_EXECUTOR=native LOBO_SKIP_COMFY=1 LOBO_WAN=1 LOBO_LTX23=0 '
+            'MODE=wan-native LOBO_MODE=wan-native; '
+        )
+    elif mode == "ltx-native":
+        queue_exports += (
+            'export LOBO_EXECUTOR=native LOBO_SKIP_COMFY=1 LOBO_WAN=0 LOBO_LTX23=1 '
+            'MODE=ltx-native LOBO_MODE=ltx-native; '
+        )
     transport = "eventforge" if use_ef else ("sqs" if use_sqs else "ws")
     loop = (
         f"{source_env}{refresh_agent}"

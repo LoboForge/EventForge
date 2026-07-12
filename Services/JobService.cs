@@ -110,7 +110,8 @@ public sealed class JobService
     private Func<JobRecord, bool> BuildCanClaimPredicate(string? workerHostname)
     {
         var modelGate = BuildModelGate(workerHostname);
-        return job => !_apps.IsPaused(job.AppId) && modelGate(job);
+        var loraGate = BuildLoraGate(workerHostname);
+        return job => !_apps.IsPaused(job.AppId) && modelGate(job) && loraGate(job);
     }
 
     private Func<JobRecord, bool> BuildModelGate(string? workerHostname)
@@ -123,6 +124,19 @@ public sealed class JobService
             var model = JobPayloadReader.ExtractModelKey(job.PayloadJson);
             if (string.IsNullOrWhiteSpace(model)) return true;
             return WorkerModelCompatibility.CanRunModel(assets, model, hostname, job.Capability);
+        };
+    }
+
+    private Func<JobRecord, bool> BuildLoraGate(string? workerHostname)
+    {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var knownLoras = worker?.KnownLoras ?? [];
+        var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
+        return job =>
+        {
+            var required = WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson);
+            if (required.Count == 0) return true;
+            return WorkerLoraCompatibility.HasAllRequiredLoras(knownLoras, assets, required);
         };
     }
 

@@ -132,12 +132,17 @@ def resolve_lora_sync_mode(hostname: str | None = None) -> str:
 
 
 def _find_comfy_models_root() -> Path | None:
-    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
-    wan_root = os.environ.get("WAN_MODEL_ROOT", "").strip()
-    if mode == "wan-native" or (
-        os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
+    """ComfyUI models tree — used for LoRA sync from loboforge.com active-loras."""
+    for candidate in (
+        "/opt/workspace-internal/ComfyUI/models",
+        "/workspace/ComfyUI/models",
+        "/workspace/comfyui/models",
+        "/opt/ComfyUI/models",
+        "/ComfyUI/models",
+        "/root/ComfyUI/models",
+        "/root/comfyui/models",
     ):
-        p = Path(wan_root)
+        p = Path(candidate)
         if p.is_dir():
             return p
     try:
@@ -153,16 +158,12 @@ def _find_comfy_models_root() -> Path | None:
         mp = Path(models_env)
         if mp.is_dir():
             return mp if mp.name == "models" else mp / "models"
-    for candidate in (
-        "/opt/workspace-internal/ComfyUI/models",
-        "/workspace/ComfyUI/models",
-        "/workspace/comfyui/models",
-        "/opt/ComfyUI/models",
-        "/ComfyUI/models",
-        "/root/ComfyUI/models",
-        "/root/comfyui/models",
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    wan_root = os.environ.get("WAN_MODEL_ROOT", "").strip()
+    if mode == "wan-native" or (
+        os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
     ):
-        p = Path(candidate)
+        p = Path(wan_root)
         if p.is_dir():
             return p
     return None
@@ -228,6 +229,13 @@ def sync_hub_active_loras(args: argparse.Namespace, mode: str | None = None) -> 
             skipped += 1
             continue
         try:
+            if "drive.google.com" in su or "docs.google.com" in su:
+                import gdown
+                gdown.download(su, str(dest), quiet=True, fuzzy=True)
+                if dest.is_file() and dest.stat().st_size > min_bytes:
+                    pulled += 1
+                    log.info("Pulled LoRA %s (gdown)", dest.name)
+                    continue
             dl_req = urllib.request.Request(su, headers={"User-Agent": "LoboForge-Worker/1.1"})
             with urllib.request.urlopen(dl_req, timeout=300) as dl_resp:
                 data = dl_resp.read()
@@ -271,12 +279,25 @@ def extract_required_loras_from_assign(payload: dict) -> list[str]:
             continue
         if ct not in lora_loaders:
             continue
-        name = inputs.get("lora_name") or inputs.get("lora")
-        if isinstance(name, str) and name.strip():
+        names: list[str] = []
+        for key in ("lora_name", "lora"):
+            val = inputs.get(key)
+            if isinstance(val, str) and val.strip():
+                names.append(val.strip())
+        if ct == "Power Lora Loader (rgthree)":
+            for slot_key, slot_val in inputs.items():
+                if not isinstance(slot_key, str) or not slot_key.startswith("lora_"):
+                    continue
+                if not isinstance(slot_val, dict):
+                    continue
+                slot_lora = slot_val.get("lora")
+                if isinstance(slot_lora, str) and slot_lora.strip():
+                    names.append(slot_lora.strip())
+        for name in names:
             key = _normalize_lora_basename(name).lower()
             if key and key not in seen:
                 seen.add(key)
-                out.append(name.strip())
+                out.append(name)
     return out
 
 

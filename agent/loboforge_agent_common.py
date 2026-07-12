@@ -91,7 +91,167 @@ def probe_forge_queue_access(capabilities: list[str]) -> dict[str, Any]:
     return probe_event_forge_access(capabilities)
 
 
+def resolve_lobo_http_base() -> str:
+    raw = (
+        os.environ.get("LOBO_BASE_URL")
+        or os.environ.get("LOBO_SERVER")
+        or "https://www.loboforge.com"
+    ).strip().rstrip("/")
+    if raw.startswith("wss://"):
+        return "https://" + raw[len("wss://") :]
+    if raw.startswith("ws://"):
+        return "http://" + raw[len("ws://") :]
+    if raw.startswith("https://") or raw.startswith("http://"):
+        return raw
+    return "https://" + raw
 
+
+def resolve_lora_sync_mode(hostname: str | None = None) -> str:
+    """Map box hostname / LOBO_MODE to LoboForge active-loras modes= query."""
+    explicit = (os.environ.get("LOBO_LORA_SYNC_MODE") or "").strip().lower()
+    if explicit:
+        return explicit.split(",")[0]
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    if mode:
+        norm = mode.split(",")[0]
+        if norm in ("all", "both", "ltx-native", "ltx"):
+            return "all"
+        if norm == "wan-native":
+            return "video"
+        return norm
+    hn = (hostname or "").lower()
+    if "-all-" in hn:
+        return "all"
+    if "-video-" in hn or "-wan-" in hn:
+        return "video"
+    if "-image-" in hn:
+        return "image"
+    if "-ltx-" in hn:
+        return "all"
+    return "all"
+
+
+def _find_comfy_models_root() -> Path | None:
+    """ComfyUI models tree — used for LoRA sync from loboforge.com active-loras."""
+    for candidate in (
+        "/opt/workspace-internal/ComfyUI/models",
+        "/workspace/ComfyUI/models",
+        "/workspace/comfyui/models",
+        "/opt/ComfyUI/models",
+        "/ComfyUI/models",
+        "/root/ComfyUI/models",
+        "/root/comfyui/models",
+    ):
+        p = Path(candidate)
+        if p.is_dir():
+            return p
+    try:
+        from loboforge_worker.paths import find_models_root
+
+        root = find_models_root(argparse.Namespace(hostname=os.environ.get("HOSTNAME", "")))
+        if root is not None:
+            return root
+    except Exception:
+        pass
+    models_env = os.environ.get("MODELS")
+    if models_env:
+        mp = Path(models_env)
+        if mp.is_dir():
+            return mp if mp.name == "models" else mp / "models"
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    wan_root = os.environ.get("WAN_MODEL_ROOT", "").strip()
+    if mode == "wan-native" or (
+        os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
+    ):
+        p = Path(wan_root)
+        if p.is_dir():
+            return p
+    return None
+
+
+def sync_hub_active_loras(args: argparse.Namespace, mode: str | None = None) -> dict[str, Any]:
+    """
+    Pull active LoRAs for this box's mode from LoboForge (GET /api/agent/active-loras).
+    Uses loboforge_worker when installed; inline HTTP fallback otherwise.
+    """
+    sync_mode = mode or resolve_lora_sync_mode(getattr(args, "hostname", None))
+    secret = (getattr(args, "secret", None) or os.environ.get("LOBO_SECRET") or "").strip()
+    if not secret:
+        raise ValueError("LOBO_SECRET not set — cannot sync LoRAs from LoboForge")
+
+    root = _find_comfy_models_root()
+    if root is None:
+        raise FileNotFoundError("ComfyUI models directory not found")
+
+    base = resolve_lobo_http_base()
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+
+    try:
+        from loboforge_worker.provision.loras import sync_active_loras
+
+        result = sync_active_loras(
+            root, base_url=base, secret=secret, mode=sync_mode, hf_token=hf_token,
+        )
+        log.info(
+            "LoRA sync mode=%s pulled=%s skipped=%s failed=%s",
+            sync_mode, result.get("pulled"), result.get("skipped"), result.get("failed"),
+        )
+        return result
+    except ImportError:
+        pass
+
+    import json
+    import urllib.request
+
+    url = f"{base.rstrip('/')}/api/agent/active-loras?modes={sync_mode}&secret={secret}"
+    req = urllib.request.Request(url, headers={"User-Agent": "LoboForge-Worker/1.1"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        items = json.loads(resp.read().decode())
+    if not isinstance(items, list):
+        items = []
+
+    loras_dir = root / "loras"
+    loras_dir.mkdir(parents=True, exist_ok=True)
+    pulled = skipped = failed = 0
+    min_bytes = 1_000_000
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        fp = (row.get("file_path") or row.get("filePath") or "").strip()
+        su = (row.get("source_url") or row.get("sourceUrl") or "").strip()
+        if not fp or not su:
+            continue
+        rel = fp.replace("\\", "/").lstrip("/")
+        if rel.lower().startswith("loras/"):
+            rel = rel[6:]
+        dest = root / "loras" / Path(rel).name
+        if dest.is_file() and dest.stat().st_size > min_bytes:
+            skipped += 1
+            continue
+        try:
+            if "drive.google.com" in su or "docs.google.com" in su:
+                import gdown
+                gdown.download(su, str(dest), quiet=True, fuzzy=True)
+                if dest.is_file() and dest.stat().st_size > min_bytes:
+                    pulled += 1
+                    log.info("Pulled LoRA %s (gdown)", dest.name)
+                    continue
+            dl_req = urllib.request.Request(su, headers={"User-Agent": "LoboForge-Worker/1.1"})
+            with urllib.request.urlopen(dl_req, timeout=300) as dl_resp:
+                data = dl_resp.read()
+            if len(data) < min_bytes:
+                failed += 1
+                continue
+            dest.write_bytes(data)
+            pulled += 1
+            log.info("Pulled LoRA %s", dest.name)
+        except Exception as ex:
+            failed += 1
+            log.warning("LoRA download failed %s: %s", dest.name, ex)
+
+    result = {"mode": sync_mode, "pulled": pulled, "skipped": skipped, "failed": failed, "source": "active-loras"}
+    log.info("LoRA sync (inline) mode=%s pulled=%s skipped=%s failed=%s", sync_mode, pulled, skipped, failed)
+    return result
 
 def _normalize_lora_basename(raw: str) -> str:
     if not raw:
@@ -119,12 +279,25 @@ def extract_required_loras_from_assign(payload: dict) -> list[str]:
             continue
         if ct not in lora_loaders:
             continue
-        name = inputs.get("lora_name") or inputs.get("lora")
-        if isinstance(name, str) and name.strip():
+        names: list[str] = []
+        for key in ("lora_name", "lora"):
+            val = inputs.get(key)
+            if isinstance(val, str) and val.strip():
+                names.append(val.strip())
+        if ct == "Power Lora Loader (rgthree)":
+            for slot_key, slot_val in inputs.items():
+                if not isinstance(slot_key, str) or not slot_key.startswith("lora_"):
+                    continue
+                if not isinstance(slot_val, dict):
+                    continue
+                slot_lora = slot_val.get("lora")
+                if isinstance(slot_lora, str) and slot_lora.strip():
+                    names.append(slot_lora.strip())
+        for name in names:
             key = _normalize_lora_basename(name).lower()
             if key and key not in seen:
                 seen.add(key)
-                out.append(name.strip())
+                out.append(name)
     return out
 
 
@@ -153,10 +326,24 @@ async def _sync_lora_inventory(state: dict, args) -> None:
             known.append(base)
 
 
+def resolve_claim_ready_capabilities(
+    state: dict,
+    capabilities: list[str] | tuple[str, ...],
+    *,
+    hostname: str | None = None,
+) -> list[str]:
+    """Capabilities this worker should poll — only those with required models on disk."""
+    return [
+        cap for cap in capabilities
+        if worker_can_poll_capability(state, cap, hostname=hostname)
+    ]
+
+
 def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]) -> dict[str, Any]:
     gpu_info = agent.get_gpu_info()
     models = agent_state.get("models") or {}
     caps = agent_state.get("forge_queue_capabilities") or []
+    claim_ready = resolve_claim_ready_capabilities(agent_state, caps, hostname=args.hostname)
     payload = {
         "node_uuid": args.node_uuid,
         "hostname": args.hostname,
@@ -172,16 +359,12 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "fleet_mode": agent.resolve_fleet_mode(args),
         "provision_mode": agent.resolve_fleet_mode(args),
         "forge_queue_capabilities": list(caps),
+        "claim_ready_capabilities": claim_ready,
         "capabilities": {
             "wd14": agent.WD14_AVAILABLE,
             "joycaption": agent.JOYCAPTION_AVAILABLE,
         },
     }
-    claim_ready = [
-        cap for cap in caps
-        if worker_can_poll_capability(agent_state, cap, hostname=args.hostname)
-    ]
-    payload["claim_ready_capabilities"] = claim_ready
     gen_mode = (os.environ.get("LOBO_GEN_QUEUE") or "").strip().lower()
     if gen_mode in ("sqs", "eventforge") or caps or os.environ.get("EVENT_FORGE_URL"):
         payload.update(probe_event_forge_access(list(caps)))
@@ -388,6 +571,12 @@ def worker_can_poll_capability(
     cap = (capability or "").strip().lower()
     if not cap:
         return False
+    if cap == "ltx" and _hostname_is_wan_or_video_only(hostname):
+        import os
+        ltx23 = (os.environ.get("LOBO_LTX23") or "0").strip().lower() not in ("0", "false", "no", "off")
+        music = (os.environ.get("LOBO_MUSIC") or "1").strip().lower() not in ("0", "false", "no", "off")
+        if music and not ltx23:
+            return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
     probe = _CAPABILITY_PROBE_MODEL.get(cap)
     if not probe:
         return True

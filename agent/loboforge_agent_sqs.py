@@ -48,14 +48,40 @@ import aiohttp
 
 import loboforge_agent as agent
 
-try:
-    from forge_queue.config import ForgeQueueConfig
-    from forge_queue.types import JobEnvelope, OutputFile, utc_now_iso
-    from forge_queue.worker import ForgeQueueWorker
-except ImportError as exc:
-    raise SystemExit(
-        "forge-queue SDK not installed — run: pip install -e forge-queue/sdk"
-    ) from exc
+# Lazy-loaded — EventForge workers import this module for LoRA/capability helpers only.
+ForgeQueueConfig: Any = None
+JobEnvelope: Any = None
+OutputFile: Any = None
+ForgeQueueWorker: Any = None
+utc_now_iso: Any = None
+_FORGE_QUEUE_SDK: bool | None = None
+
+
+def _load_forge_queue_sdk() -> bool:
+    global ForgeQueueConfig, JobEnvelope, OutputFile, ForgeQueueWorker, utc_now_iso, _FORGE_QUEUE_SDK
+    if _FORGE_QUEUE_SDK is not None:
+        return _FORGE_QUEUE_SDK
+    try:
+        from forge_queue.config import ForgeQueueConfig as _ForgeQueueConfig
+        from forge_queue.types import JobEnvelope as _JobEnvelope, OutputFile as _OutputFile, utc_now_iso as _utc_now_iso
+        from forge_queue.worker import ForgeQueueWorker as _ForgeQueueWorker
+
+        ForgeQueueConfig = _ForgeQueueConfig
+        JobEnvelope = _JobEnvelope
+        OutputFile = _OutputFile
+        ForgeQueueWorker = _ForgeQueueWorker
+        utc_now_iso = _utc_now_iso
+        _FORGE_QUEUE_SDK = True
+    except ImportError:
+        _FORGE_QUEUE_SDK = False
+    return _FORGE_QUEUE_SDK
+
+
+def _require_forge_queue_sdk() -> None:
+    if not _load_forge_queue_sdk():
+        raise RuntimeError(
+            "forge-queue SDK not installed — run: pip install -e forge-queue/sdk"
+        )
 
 from loboforge_agent_common import (
     CHECK_IN_INTERVAL,
@@ -134,16 +160,16 @@ except ImportError:
             caps: list[str] = []
             if wan:
                 caps.append("wan")
-            if ltx23 or music:
+            if ltx23:
                 caps.append("ltx")
             return tuple(caps or ("wan",))
         if mode_l == "music":
-            return ("ltx",)
+            return ("wan",)
         if mode_l == "all":
             caps = ["flux-klein", "flux-klein-edit", "zimage", "chroma"]
             if wan:
                 caps.append("wan")
-            if ltx23 or music:
+            if ltx23:
                 caps.append("ltx")
             return tuple(caps)
         if mode_l in ("ltx-native", "ltx"):
@@ -385,6 +411,7 @@ async def api_request_work_download(
             )
             return None
         if mtype == "download_lora":
+            _require_forge_queue_sdk()
             stub = SqsGpuSession(
                 args,
                 ForgeQueueConfig.from_env(),
@@ -997,6 +1024,7 @@ async def api_check_in_loop(
 
 
 async def run_sqs_agent(args: argparse.Namespace) -> None:
+    _require_forge_queue_sdk()
     config = ForgeQueueConfig.from_env()
     capabilities = resolve_capabilities(args.hostname, os.environ.get("LOBO_MODE"))
     agent_state: dict[str, Any] = {
@@ -1048,6 +1076,7 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+    _require_forge_queue_sdk()
     args = build_parser().parse_args()
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)

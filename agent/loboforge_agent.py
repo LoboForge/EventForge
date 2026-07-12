@@ -494,10 +494,16 @@ async def _native_wan_inventory() -> dict:
 
 
 def _is_native_wan_box() -> bool:
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    # Comfy-provisioned video/image boxes must not route to native Wan (hostname may say wan-native).
+    if mode in ("video", "image", "all"):
+        return False
+    if mode == "wan-native" or os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native":
+        return True
     try:
         from loboforge_worker.executor_mode import is_native_wan_hostname
-        mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
-        return mode == "wan-native" or is_native_wan_hostname()
+
+        return is_native_wan_hostname()
     except ImportError:
         hn = (os.environ.get("LOBO_HOSTNAME") or "").lower()
         return "wan-native" in hn or hn.startswith("loboforge-wan-")

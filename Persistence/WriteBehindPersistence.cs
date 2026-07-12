@@ -103,10 +103,14 @@ public sealed class WriteBehindPersistence : BackgroundService
             _jobs.Load(job);
             loaded++;
         }
+        var remapped = _jobs.RemapLegacyMusicCapabilities();
         _loaded = true;
+        if (remapped > 0)
+            MarkDirty();
         _log.LogInformation(
-            "EventForge cache loaded {Count} jobs from SQLite (active + last {Hours}h terminal)",
-            loaded, MemoryCacheRetention.TotalHours);
+            "EventForge cache loaded {Count} jobs from SQLite (active + last {Hours}h terminal){Remap}",
+            loaded, MemoryCacheRetention.TotalHours,
+            remapped > 0 ? $"; remapped {remapped} legacy music job(s) ltx→wan" : "");
     }
 
     /// <summary>Memory cache first; on miss load from SQLite and hydrate cache.</summary>

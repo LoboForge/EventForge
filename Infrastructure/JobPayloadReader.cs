@@ -19,20 +19,6 @@ public static class JobPayloadReader
         }
     }
 
-    public static string? ExtractExternalId(string? payloadJson)
-    {
-        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
-        try
-        {
-            using var doc = JsonDocument.Parse(payloadJson);
-            return ExtractExternalIdFromElement(doc.RootElement);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
     private static string? ExtractFromElement(JsonElement el)
     {
         if (el.ValueKind != JsonValueKind.Object) return null;
@@ -59,6 +45,20 @@ public static class JobPayloadReader
             return null;
         var model = modelEl.GetString()?.Trim();
         return string.IsNullOrWhiteSpace(model) ? null : model;
+    }
+
+    public static string? ExtractExternalId(string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadJson);
+            return ExtractExternalIdFromElement(doc.RootElement);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static string? ExtractExternalIdFromElement(JsonElement el)

@@ -25,6 +25,7 @@ public static class AgentEndpoints
             "worker-bootstrap-env.sh",
             "install_ace_step.sh",
             "ltx-agent-watchdog.sh",
+            "wan-agent-watchdog.sh",
             "loboforge_worker.tar.gz",
             "forge-queue-sdk.tar.gz",
         };

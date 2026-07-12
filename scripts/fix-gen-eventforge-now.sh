@@ -154,6 +154,11 @@ fix_one() {
   elif [[ "$label" == loboforge-wan-native ]]; then hn="loboforge-wan-native-${suffix}"
   else hn="$(echo "$label" | tr ' ' '-')-${suffix}"
   fi
+  if [[ "$label" == loboforge-wan-native ]]; then LORA_CAPS="wan"
+  elif [[ "$label" == loboforge-video || "$label" == loboforge-ltx ]]; then LORA_CAPS="video"
+  elif [[ "$label" == loboforge-image ]]; then LORA_CAPS="image"
+  else LORA_CAPS="all"
+  fi
 
   echo ""
   echo "▶ BEFORE $id ($label) $host:$port hostname=$hn"
@@ -182,12 +187,13 @@ fix_one() {
   fi
 
   if ! ssh -p "$port" -o StrictHostKeyChecking=no -o ConnectTimeout=60 "root@${host}" \
-    "LOBO_SECRET=$(printf '%q' "$LOBO_SECRET") HN=$(printf '%q' "$hn") LOBO_GEN_QUEUE=$(printf '%q' "$LOBO_GEN_QUEUE") LOBO_BASE_URL=$(printf '%q' "$LOBO_BASE_URL") LOBO_SERVER=$(printf '%q' "$LOBO_SERVER") REPO_AGENT_SHA=$(printf '%q' "$REPO_AGENT_SHA") AWS_ACCESS_KEY_ID=$(printf '%q' "$AWS_ACCESS_KEY_ID") AWS_SECRET_ACCESS_KEY=$(printf '%q' "$AWS_SECRET_ACCESS_KEY") FORGE_QUEUE_REGION=$(printf '%q' "$FORGE_QUEUE_REGION") FORGE_QUEUE_BUCKET=$(printf '%q' "$FORGE_QUEUE_BUCKET") FORGE_QUEUE_PREFIX=$(printf '%q' "$FORGE_QUEUE_PREFIX") EVENT_FORGE_URL=$(printf '%q' "$EVENT_FORGE_URL") EVENT_FORGE_WORKER_KEY=$(printf '%q' "$EVENT_FORGE_WORKER_KEY") bash -s" <<'REMOTE'
+    "LOBO_SECRET=$(printf '%q' "$LOBO_SECRET") HN=$(printf '%q' "$hn") LOBO_GEN_QUEUE=$(printf '%q' "$LOBO_GEN_QUEUE") LOBO_BASE_URL=$(printf '%q' "$LOBO_BASE_URL") LOBO_SERVER=$(printf '%q' "$LOBO_SERVER") REPO_AGENT_SHA=$(printf '%q' "$REPO_AGENT_SHA") AWS_ACCESS_KEY_ID=$(printf '%q' "$AWS_ACCESS_KEY_ID") AWS_SECRET_ACCESS_KEY=$(printf '%q' "$AWS_SECRET_ACCESS_KEY") FORGE_QUEUE_REGION=$(printf '%q' "$FORGE_QUEUE_REGION") FORGE_QUEUE_BUCKET=$(printf '%q' "$FORGE_QUEUE_BUCKET") FORGE_QUEUE_PREFIX=$(printf '%q' "$FORGE_QUEUE_PREFIX") EVENT_FORGE_URL=$(printf '%q' "$EVENT_FORGE_URL") EVENT_FORGE_WORKER_KEY=$(printf '%q' "$EVENT_FORGE_WORKER_KEY") LORA_CAPS=$(printf '%q' "$LORA_CAPS") bash -s" <<'REMOTE'
 set -euo pipefail
 PATCH_GEN_QUEUE="${LOBO_GEN_QUEUE:-eventforge}"
 PATCH_EF_URL="${EVENT_FORGE_URL:-}"
 PATCH_EF_KEY="${EVENT_FORGE_WORKER_KEY:-}"
 PATCH_LOBO_SECRET="${LOBO_SECRET:-}"
+PATCH_LORA_CAPS="${LORA_CAPS:-all}"
 [[ -f /workspace/.loboforge-env ]] && source /workspace/.loboforge-env || true
 LOBO_GEN_QUEUE="$PATCH_GEN_QUEUE"
 EVENT_FORGE_URL="$PATCH_EF_URL"
@@ -213,9 +219,18 @@ fi
 
 ENV_FILE=/workspace/.loboforge-env
 touch "$ENV_FILE"
-python3 - "$ENV_FILE" "$PATCH_GEN_QUEUE" "$LOBO_BASE_URL" "$FORGE_QUEUE_REGION" "$FORGE_QUEUE_BUCKET" "$FORGE_QUEUE_PREFIX" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "${EVENT_FORGE_URL:-}" "${EVENT_FORGE_WORKER_KEY:-}" "${LOBO_SECRET:-}" <<'PY'
+python3 - "$ENV_FILE" "$PATCH_GEN_QUEUE" "$LOBO_BASE_URL" "$FORGE_QUEUE_REGION" "$FORGE_QUEUE_BUCKET" "$FORGE_QUEUE_PREFIX" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "${EVENT_FORGE_URL:-}" "${EVENT_FORGE_WORKER_KEY:-}" "${LOBO_SECRET:-}" "$PATCH_LORA_CAPS" <<'PY'
 import pathlib, sys
-path, mode, base, region, bucket, prefix, ak, sk, ef_url, ef_key, lobo_secret = sys.argv[1:12]
+path, mode, base, region, bucket, prefix, ak, sk, ef_url, ef_key, lobo_secret, lora_caps = sys.argv[1:13]
+caps = (lora_caps or "all").strip()
+if caps == "wan":
+    forge_caps = "wan"
+elif caps == "video":
+    forge_caps = "wan"
+elif caps == "image":
+    forge_caps = "flux-klein,flux-klein-edit,zimage,chroma"
+else:
+    forge_caps = "flux-klein,flux-klein-edit,zimage,chroma,wan"
 lines = pathlib.Path(path).read_text(encoding="utf-8").splitlines() if pathlib.Path(path).is_file() else []
 keys = {
     "LOBO_SECRET": lobo_secret,
@@ -230,6 +245,7 @@ keys = {
     "FORGE_QUEUE_SECRET_KEY": sk,
     "EVENT_FORGE_URL": ef_url,
     "EVENT_FORGE_WORKER_KEY": ef_key,
+    "FORGE_QUEUE_CAPABILITY": forge_caps,
 }
 out, seen = [], set()
 for line in lines:
@@ -249,7 +265,12 @@ for key, val in keys.items():
         out.append(f'export {key}="{val}"')
 pathlib.Path(path).write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 PY
-/venv/main/bin/pip install -q -U aiohttp websockets boto3 2>/dev/null || pip install -q -U aiohttp websockets boto3
+/venv/main/bin/pip install -q -U aiohttp websockets boto3 gdown 2>/dev/null || pip install -q -U aiohttp websockets boto3 gdown
+cat > /usr/local/bin/gdown <<'GDOWN'
+#!/bin/sh
+exec /venv/main/bin/python3 -m gdown "$@"
+GDOWN
+chmod +x /usr/local/bin/gdown
 sdk_dir="/workspace/forge-queue/sdk"
 if [[ ! -f "$sdk_dir/pyproject.toml" ]]; then
   if curl -fsSL -A 'LoboForge-Worker/1.1' "${LOBO_BASE_URL}/agent/forge-queue-sdk.tar.gz" -o /tmp/forge-queue-sdk.tar.gz 2>/dev/null; then

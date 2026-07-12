@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# On-box Wan native watchdog — cron every 5 min. Heals missing agent tmux after provision.
+set -euo pipefail
+
+mkdir -p /workspace
+cd /workspace
+[[ -f /workspace/.loboforge-env ]] && set -a && . /workspace/.loboforge-env && set +a
+
+BASE="${LOBO_BASE_URL:-https://www.loboforge.com}"
+BASE="${BASE%/}"
+EF_BASE="${EVENT_FORGE_URL:-https://eventforge.loboforge.com}"
+EF_BASE="${EF_BASE%/}"
+LF_UA="LoboForge-Worker/1.1"
+
+if command -v service >/dev/null 2>&1; then
+  service cron start 2>/dev/null || true
+elif command -v cron >/dev/null 2>&1; then
+  pgrep -x cron >/dev/null 2>&1 || cron 2>/dev/null || true
+fi
+
+if [[ ! -x /workspace/wan-agent-watchdog.sh ]]; then
+  for wd_url in "${EF_BASE}/agent/wan-agent-watchdog.sh" "${BASE}/agent/wan-agent-watchdog.sh"; do
+    curl -fsSL -A "$LF_UA" "$wd_url" -o /workspace/wan-agent-watchdog.sh 2>/dev/null && break
+  done
+  chmod +x /workspace/wan-agent-watchdog.sh 2>/dev/null || true
+fi
+(crontab -l 2>/dev/null | grep -v wan-agent-watchdog.sh || true
+ echo '*/5 * * * * bash /workspace/wan-agent-watchdog.sh >> /workspace/wan-watchdog.log 2>&1') | crontab - 2>/dev/null || true
+
+if tmux has-session -t loboforge-agent 2>/dev/null; then
+  exit 0
+fi
+
+PY="${PY:-/venv/main/bin/python3}"
+[[ -x "$PY" ]] || PY="$(command -v python3)"
+
+WAN_ROOT="${WAN_MODEL_ROOT:-/workspace/wan-models}"
+if [[ ! -d "${WAN_ROOT}/Wan2.2-I2V-A14B/high_noise_model" ]] \
+   && [[ ! -f "${WAN_ROOT}/layout.json" ]]; then
+  echo "[$(date -Is)] watchdog: native Wan models not ready — skip agent launch" >> /workspace/wan-watchdog.log
+  exit 0
+fi
+
+echo "[$(date -Is)] watchdog: agent tmux missing — reconnecting" >> /workspace/wan-watchdog.log
+
+export LOBO_EXECUTOR=native LOBO_SKIP_COMFY=0 LOBO_WAN=1 LOBO_LTX23=0 LOBO_MUSIC=0 LOBO_UNLOAD_MODELS=0
+export MODE=wan-native LOBO_MODE=wan-native
+export WAN_MODEL_ROOT="$WAN_ROOT" WAN_REPO="${WAN_REPO:-/workspace/Wan2.2}"
+export LOBO_LABEL="${LOBO_LABEL:-loboforge-wan-native}"
+[[ -n "${CONTAINER_ID:-}" && -z "${LOBO_INSTANCE_ID:-}" ]] && export LOBO_INSTANCE_ID="${CONTAINER_ID}"
+
+if [[ -f /workspace/worker-bootstrap-env.sh ]]; then
+  # shellcheck source=/workspace/worker-bootstrap-env.sh
+  source /workspace/worker-bootstrap-env.sh
+  type lobo_install_forge_queue_sdk &>/dev/null && lobo_install_forge_queue_sdk "$PY" || true
+fi
+
+if [[ ! -d /workspace/loboforge_worker ]]; then
+  for tarball_url in "${EF_BASE}/agent/loboforge_worker.tar.gz" "${BASE}/agent/loboforge_worker.tar.gz"; do
+    curl -fsSL -A "$LF_UA" "$tarball_url" -o /tmp/loboforge_worker.tar.gz 2>/dev/null && break
+  done
+  tar -xzf /tmp/loboforge_worker.tar.gz -C /workspace
+  rm -f /tmp/loboforge_worker.tar.gz
+fi
+
+export PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"
+
+"$PY" -m loboforge_worker sync-loras \
+  --base-url "$BASE" \
+  --secret "${LOBO_SECRET:?LOBO_SECRET missing in .loboforge-env}" \
+  --mode video \
+  2>&1 | tee -a /workspace/lora-sync.log || true
+
+"$PY" -m loboforge_worker provision-wan-native --connect-only \
+  --secret "${LOBO_SECRET:?LOBO_SECRET missing in .loboforge-env}" \
+  --server "${LOBO_SERVER:-wss://www.loboforge.com}" \
+  --base-url "$BASE" \
+  --instance-id "${LOBO_INSTANCE_ID:-unknown}" \
+  --label "$LOBO_LABEL" \
+  --hf-token "${HF_TOKEN:-}" \
+  2>&1 | tee -a /workspace/wan-watchdog.log

@@ -6,7 +6,8 @@ Read this before changing EventForge code, ops workflows, or GPU fleet boxes. Yo
 
 **Public site:** https://eventforge.loboforge.com/  
 **Ops console:** https://eventforge.loboforge.com/ops (requires ops key; `noindex`)  
-**Integrator API docs:** `docs/QueueIntegration.md`  
+**Integrator API docs:** `docs/QueueIntegration.md` 
+**Worker provisioning (Vast rent/patch):** `docs/worker-provisioning.md` 
 **Deploy:** `docs/deploy-to-prod.md`
 
 ---
@@ -104,6 +105,7 @@ Config: `EventForge:*` in `appsettings.json` / `APP_SECRETS_JSON` (`ApiKey`, `Wo
 | `agent/` | Worker bootstrap scripts + Python agents (served at `/agent/*` in Docker) |
 | `vendor/loboforge_worker/` | Minimal worker helpers for fleet patch SSH |
 | `docs/QueueIntegration.md` | Full integrator reference |
+| `docs/worker-provisioning.md` | Vast rent/search, patch scripts, credentials, common failures |
 
 ---
 
