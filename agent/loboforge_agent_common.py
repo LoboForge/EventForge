@@ -131,18 +131,21 @@ def resolve_lora_sync_mode(hostname: str | None = None) -> str:
     return "all"
 
 
-def _native_wan_layout_ready() -> bool:
-    """Native Wan boxes must not poll/claim until layout.json exists and I2V weights are on disk."""
+def _is_native_wan_box(hostname: str | None = None) -> bool:
     mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
     executor = os.environ.get("LOBO_EXECUTOR", "").strip().lower()
-    hn = (os.environ.get("LOBO_HOSTNAME") or os.environ.get("HN") or "").lower()
-    native_box = (
+    hn = (hostname or os.environ.get("LOBO_HOSTNAME") or os.environ.get("HN") or "").lower()
+    return (
         mode == "wan-native"
         or executor == "native"
         or "wan-native" in hn
         or hn.startswith("loboforge-wan-")
     )
-    if not native_box:
+
+
+def _native_wan_layout_ready() -> bool:
+    """Native Wan boxes must not poll/claim until layout.json exists and I2V weights are on disk."""
+    if not _is_native_wan_box():
         return True
     wan_root = (os.environ.get("WAN_MODEL_ROOT") or "/workspace/wan-models").strip()
     try:
@@ -651,8 +654,11 @@ def worker_can_poll_capability(
     cap = (capability or "").strip().lower()
     if not cap:
         return False
-    if cap == "wan" and not _native_wan_layout_ready():
-        return False
+    if cap == "wan":
+        if _is_native_wan_box(hostname):
+            return _native_wan_layout_ready()
+        if not _native_wan_layout_ready():
+            return False
     if cap == "ltx" and _music_enabled() and not _ltx23_enabled():
         return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
     probe = _CAPABILITY_PROBE_MODEL.get(cap)
