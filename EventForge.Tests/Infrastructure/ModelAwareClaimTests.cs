@@ -49,6 +49,14 @@ public sealed class WorkerModelCompatibilityTests
             .Should().BeTrue();
     }
     [Fact]
+    public void CanRunModel_allows_wan2_on_wan_native_without_comfy_inventory()
+    {
+        var assets = WorkerModelAssets.FromJson("{}");
+        WorkerModelCompatibility.CanRunModel(assets, "wan2", "loboforge-wan-native-44566757", "wan")
+            .Should().BeTrue();
+    }
+
+    [Fact]
     public void CanRunModel_allows_joycaption_on_joycaption_hostname_without_assets()
     {
         var assets = WorkerModelAssets.FromJson("{}");

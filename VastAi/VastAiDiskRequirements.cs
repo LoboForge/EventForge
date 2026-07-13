@@ -10,7 +10,7 @@ public static class VastAiDiskRequirements
     public static int RecommendedRentDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 130,
-        "wan-native" => 130,
+        "wan-native" => 150,
         "video" => 130,
         "music" => 80,
         "all"   => 150,

@@ -28,6 +28,12 @@ public static class WorkerModelCompatibility
                 || lower.Contains("roleplay", StringComparison.Ordinal)))
             return true;
 
+        // Native Wan workers skip Comfy inventory — gate on claim_ready + layout on the box.
+        if (HostnameIsWanNative(hn)
+            && (lower is "wan2" or "wan2flf" or "wan2t2v"
+                || string.Equals(capability, "wan", StringComparison.OrdinalIgnoreCase)))
+            return true;
+
         if (assets.Assets.Count == 0)
             return false;
 
@@ -131,6 +137,10 @@ public static class WorkerModelCompatibility
 
     /// <summary>Ollama/dolphin jobs must never terminal-fail — workers release back to queue instead.</summary>
     public static bool IsNeverFailCapability(string? capability) => IsOllamaChatCapability(capability);
+
+    private static bool HostnameIsWanNative(string hostname) =>
+        hostname.Contains("wan-native", StringComparison.OrdinalIgnoreCase)
+        || hostname.StartsWith("loboforge-wan-", StringComparison.OrdinalIgnoreCase);
 
     private static bool HostnameIsImageOnly(string hostname)
     {
