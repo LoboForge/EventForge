@@ -220,6 +220,59 @@ public static class OpsEndpoints
             });
         });
 
+        app.MapPost("/v1/ops/jobs/restore-from-s3", async (
+            HttpContext ctx,
+            RestoreFromS3Request? body,
+            ISqliteS3Persistence sqliteS3,
+            WriteBehindPersistence persist,
+            JobService jobs,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+
+            var restore = await sqliteS3.ForceRestoreFromS3Async(ct);
+            if (!restore.Restored)
+            {
+                return Results.BadRequest(new
+                {
+                    restored = false,
+                    skip_reason = restore.SkipReason,
+                });
+            }
+
+            var loaded = await persist.ReloadAllActiveFromSqliteAsync(ct);
+            var requeued = 0;
+            IReadOnlyList<string> requeuedIds = Array.Empty<string>();
+            if (body?.RequeueFailed == true)
+            {
+                (requeued, var ids) = await jobs.RequeueFailedAsync(
+                    body.Capability,
+                    body.AppId,
+                    body.ErrorContains,
+                    body.Limit,
+                    ct);
+                requeuedIds = ids;
+                if (requeued > 0)
+                    await persist.FlushAsync(ct);
+            }
+
+            return Results.Ok(new
+            {
+                restored = true,
+                restore_key = restore.RestoreKey,
+                restored_job_count = restore.RestoredJobCount,
+                replaced_local_job_count = restore.ReplacedLocalJobCount,
+                loaded_active_jobs = loaded,
+                jobs_total = queue.TotalCount,
+                jobs_queued = queue.QueuedCount,
+                requeued_failed = requeued,
+                requeued_job_ids_sample = requeuedIds.Take(20).ToList(),
+            });
+        });
+
         app.MapPost("/v1/ops/jobs/flush-backup", async (
             HttpContext ctx,
             WriteBehindPersistence persist,
@@ -625,6 +678,15 @@ public sealed class CancelMatchingRequest
 
 public sealed class RequeueFailedRequest
 {
+    public string? Capability { get; set; }
+    public string? AppId { get; set; }
+    public string? ErrorContains { get; set; }
+    public int? Limit { get; set; }
+}
+
+public sealed class RestoreFromS3Request
+{
+    public bool RequeueFailed { get; set; } = true;
     public string? Capability { get; set; }
     public string? AppId { get; set; }
     public string? ErrorContains { get; set; }

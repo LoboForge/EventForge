@@ -113,6 +113,60 @@ public sealed class WriteBehindPersistence : BackgroundService
             remapped > 0 ? $"; remapped {remapped} legacy music job(s) ltx→wan" : "");
     }
 
+    /// <summary>Replace in-memory cache with all active jobs from SQLite (ops recovery).</summary>
+    public async Task<int> ReloadAllActiveFromSqliteAsync(CancellationToken ct)
+    {
+        var path = Path.GetFullPath(_opts.SqlitePath);
+        if (!File.Exists(path))
+        {
+            _jobs.Clear();
+            _loaded = true;
+            return 0;
+        }
+
+        _jobs.Clear();
+        await using var conn = Open(path);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT * FROM jobs
+            WHERE status IN ($queued, $leased, $streaming, $failed)
+            """;
+        cmd.Parameters.AddWithValue("$queued", JobStatus.Queued);
+        cmd.Parameters.AddWithValue("$leased", JobStatus.Leased);
+        cmd.Parameters.AddWithValue("$streaming", JobStatus.Streaming);
+        cmd.Parameters.AddWithValue("$failed", JobStatus.Failed);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var loaded = 0;
+        while (await reader.ReadAsync(ct))
+        {
+            var job = ReadJob(reader);
+            if (job.Status is JobStatus.Leased or JobStatus.Streaming)
+            {
+                var leaseExpired = job.LeasedUntil is not { } until || until <= DateTimeOffset.UtcNow;
+                if (leaseExpired)
+                {
+                    job.Status = JobStatus.Queued;
+                    job.WorkerId = null;
+                    job.WorkerHostname = null;
+                    job.LeasedAt = null;
+                    job.LeasedUntil = null;
+                }
+            }
+            _jobs.Load(job);
+            loaded++;
+        }
+        var remapped = _jobs.RemapLegacyMusicCapabilities();
+        _loaded = true;
+        if (remapped > 0)
+            MarkDirty();
+        _log.LogWarning(
+            "EventForge ops reload hydrated {Count} active job(s) from SQLite{Remap}",
+            loaded,
+            remapped > 0 ? $"; remapped {remapped} legacy music job(s) ltx→wan" : "");
+        return loaded;
+    }
+
     /// <summary>Memory cache first; on miss load from SQLite and hydrate cache.</summary>
     public async Task<JobRecord?> TryGetJobAsync(string jobId, CancellationToken ct)
     {

@@ -12,6 +12,7 @@ public interface ISqliteS3Persistence
 {
     string DatabasePath { get; }
     Task RestoreOnStartupAsync(CancellationToken ct = default);
+    Task<SqliteS3RestoreResult> ForceRestoreFromS3Async(CancellationToken ct = default);
     Task<SqliteS3BackupResult> BackupAsync(CancellationToken ct = default);
 }
 
@@ -47,8 +48,23 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
 
         if (File.Exists(DatabasePath) && new FileInfo(DatabasePath).Length > 0)
         {
-            _log.LogInformation("EventForge SQLite exists locally at {Path}; skipping S3 restore", DatabasePath);
-            return;
+            var localJobs = await SqliteStoreStats.CountJobsAsync(DatabasePath, ct);
+            var localBytes = SqliteStoreStats.FileBytes(DatabasePath);
+            var (remoteBytes, remoteJobs) = await InspectRemoteAsync(bucket, key, ct);
+            if (SqliteBackupPolicy.ShouldRefuseOverwrite(localJobs, localBytes, remoteJobs, remoteBytes))
+            {
+                _log.LogWarning(
+                    "EventForge local SQLite looks truncated ({LocalJobs} jobs, {LocalBytes} bytes) vs remote ({RemoteJobs}, {RemoteBytes}); force-restoring from S3",
+                    localJobs, localBytes, remoteJobs, remoteBytes);
+                var forced = await ForceRestoreFromS3Async(ct);
+                if (forced.Restored)
+                    return;
+            }
+            else
+            {
+                _log.LogInformation("EventForge SQLite exists locally at {Path}; skipping S3 restore", DatabasePath);
+                return;
+            }
         }
 
         var restoreKey = await PickBestRestoreKeyAsync(bucket, key, ct);
@@ -75,6 +91,64 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
         catch (Exception ex)
         {
             _log.LogWarning(ex, "EventForge S3 restore failed; starting with local SQLite");
+        }
+    }
+
+    public async Task<SqliteS3RestoreResult> ForceRestoreFromS3Async(CancellationToken ct = default)
+    {
+        if (_s3 == null || !_opts.S3.Enabled)
+            return new SqliteS3RestoreResult { Skipped = true, SkipReason = "s3_disabled" };
+
+        var bucket = _opts.S3.Bucket.Trim();
+        var key = _opts.S3.Key.Trim().TrimStart('/');
+        if (bucket.Length == 0 || key.Length == 0)
+            return new SqliteS3RestoreResult { Skipped = true, SkipReason = "s3_not_configured" };
+
+        var restoreKey = await PickBestRestoreKeyAsync(bucket, key, ct);
+        if (restoreKey == null)
+            return new SqliteS3RestoreResult { Skipped = true, SkipReason = "no_trusted_snapshot" };
+
+        var priorLocalJobs = File.Exists(DatabasePath)
+            ? await SqliteStoreStats.CountJobsAsync(DatabasePath, ct)
+            : 0;
+        var priorLocalBytes = SqliteStoreStats.FileBytes(DatabasePath);
+
+        var tempPath = DatabasePath + ".restore";
+        try
+        {
+            using var resp = await _s3!.GetObjectAsync(bucket, restoreKey, ct);
+            await using (var fs = File.Create(tempPath))
+                await resp.ResponseStream.CopyToAsync(fs, ct);
+
+            var restoredJobs = await SqliteStoreStats.CountJobsAsync(tempPath, ct);
+            var restoredBytes = SqliteStoreStats.FileBytes(tempPath);
+            File.Copy(tempPath, DatabasePath, overwrite: true);
+
+            _log.LogWarning(
+                "EventForge force-restored SQLite from s3://{Bucket}/{Key} ({Jobs} jobs, {Bytes} bytes; replaced local_jobs={LocalJobs})",
+                bucket, restoreKey, restoredJobs, restoredBytes, priorLocalJobs);
+
+            return new SqliteS3RestoreResult
+            {
+                Restored = true,
+                RestoreKey = restoreKey,
+                RestoredJobCount = restoredJobs,
+                RestoredBytes = restoredBytes,
+                ReplacedLocalJobCount = priorLocalJobs,
+                ReplacedLocalBytes = priorLocalBytes,
+            };
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "EventForge force restore from S3 failed");
+            return new SqliteS3RestoreResult { Skipped = true, SkipReason = ex.Message };
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch { /* ignore */ }
+            }
         }
     }
 

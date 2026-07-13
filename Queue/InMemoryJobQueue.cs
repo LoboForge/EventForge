@@ -27,6 +27,15 @@ public sealed class InMemoryJobQueue
         get { lock (_lock) return _jobs.Count; }
     }
 
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _jobs.Clear();
+            _queuedOrder.Clear();
+        }
+    }
+
     public void Load(JobRecord job)
     {
         lock (_lock)
