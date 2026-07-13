@@ -129,6 +129,12 @@ public sealed class JobService
 
     private Func<JobRecord, bool> BuildLoraGate(string? workerHostname)
     {
+        var hn = workerHostname ?? "";
+        // Native Wan pulls LoRAs on-demand after claim — do not block the queue head on check-in inventory.
+        if (hn.Contains("wan-native", StringComparison.OrdinalIgnoreCase)
+            || hn.StartsWith("loboforge-wan-", StringComparison.OrdinalIgnoreCase))
+            return _ => true;
+
         var worker = _fleet.TryGetWorkerByHostname(workerHostname);
         var knownLoras = worker?.KnownLoras ?? [];
         var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
