@@ -711,6 +711,16 @@ public sealed class JobService
         var job = await _persist.TryGetJobAsync(jobId, ct);
         if (job == null || job.WorkerId != workerId) return null;
 
+        if (WorkerModelCompatibility.IsNeverFailCapability(job.Capability))
+        {
+            _log.LogWarning(
+                "Redirecting fail→release for {Cap} job {Job}: {Error}",
+                job.Capability, job.JobId, error);
+            if (!await ReleaseAsync(jobId, workerId, ct))
+                return null;
+            return await _persist.TryGetJobAsync(jobId, ct);
+        }
+
         job.Status = JobStatus.Failed;
         job.Error = error;
         job.CompletedAt = DateTimeOffset.UtcNow;

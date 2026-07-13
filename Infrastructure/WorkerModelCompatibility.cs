@@ -129,6 +129,9 @@ public static class WorkerModelCompatibility
         string.Equals(capability, "ollama-chat", StringComparison.OrdinalIgnoreCase)
         || string.Equals(capability, "dolphin", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Ollama/dolphin jobs must never terminal-fail — workers release back to queue instead.</summary>
+    public static bool IsNeverFailCapability(string? capability) => IsOllamaChatCapability(capability);
+
     private static bool HostnameIsImageOnly(string hostname)
     {
         var hn = hostname.ToLowerInvariant();

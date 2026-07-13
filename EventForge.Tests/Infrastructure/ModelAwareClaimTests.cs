@@ -22,6 +22,14 @@ public sealed class WorkerModelCompatibilityTests
     }
 
     [Fact]
+    public void IsNeverFailCapability_matches_ollama_caps()
+    {
+        WorkerModelCompatibility.IsNeverFailCapability("ollama-chat").Should().BeTrue();
+        WorkerModelCompatibility.IsNeverFailCapability("dolphin").Should().BeTrue();
+        WorkerModelCompatibility.IsNeverFailCapability("wan").Should().BeFalse();
+    }
+
+    [Fact]
     public void CanRunModel_allows_dolphin3_on_ollama_chat_without_comfy_inventory()
     {
         var assets = WorkerModelAssets.FromJson("{}");

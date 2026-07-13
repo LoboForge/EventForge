@@ -210,15 +210,20 @@ class EventForgeClient:
                 raise RuntimeError(f"complete failed HTTP {r.status}: {body[:200]}")
 
     async def fail(self, job_id: str, error: str) -> None:
+        """Ollama/dolphin jobs must never terminal-fail — release back to queue."""
+        await self.release(job_id, reason=error)
+
+    async def release(self, job_id: str, *, reason: str | None = None) -> None:
         async with self.session.post(
-            f"{self.base}/v1/jobs/{job_id}/fail",
-            json={"error": error},
+            f"{self.base}/v1/jobs/{job_id}/release",
             headers=self.headers,
             timeout=aiohttp.ClientTimeout(total=30),
         ) as r:
             if not r.ok:
                 body = await r.text()
-                log.warning("fail POST HTTP %s: %s", r.status, body[:200])
+                log.warning("release POST HTTP %s: %s", r.status, body[:200])
+            elif reason:
+                log.warning("Released job %s back to queue: %s", job_id[:8], reason[:200])
 
 
 class StreamWriter:
@@ -343,14 +348,14 @@ async def process_job(
 
         status, result = await run_chat_job(raw, job_id, args, ef, active_model, models)
         if status == "failed":
-            await ef.fail(job_id, result or "Ollama error")
-            log.warning("[%s] failed: %s", job_id[:8], result)
+            await ef.release(job_id, reason=result or "Ollama error")
+            log.warning("[%s] released (was error): %s", job_id[:8], result)
         else:
             await ef.complete(job_id, result or "")
             log.info("[%s] Done (%d chars)", job_id[:8], len(result or ""))
     except Exception as ex:
-        log.exception("Job %s failed", job_id[:8])
-        await ef.fail(job_id, str(ex))
+        log.exception("Job %s error — releasing back to queue", job_id[:8])
+        await ef.release(job_id, reason=str(ex))
     finally:
         state["current_job"] = None
 
