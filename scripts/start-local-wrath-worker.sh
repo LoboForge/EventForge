@@ -51,7 +51,7 @@ export LOBO_LTX23=0
 export LOBO_MUSIC=1
 export LOBO_WAN=1
 export LOBO_MODE="${LOBO_MODE:-all}"
-export FORGE_QUEUE_CAPABILITY="${FORGE_QUEUE_CAPABILITY:-flux-klein,flux-klein-edit,zimage,chroma,ltx}"
+export FORGE_QUEUE_CAPABILITY="${FORGE_QUEUE_CAPABILITY:-flux-klein,flux-klein-edit,zimage,chroma,wan,ltx}"
 export EVENT_FORGE_URL EVENT_FORGE_WORKER_KEY LOBO_BASE_URL LOBO_SECRET
 export MODELS="${COMFY_MODELS}"
 export PYTHONPATH="${AGENT_DIR}${PYTHONPATH:+:$PYTHONPATH}"
