@@ -117,11 +117,11 @@ export function normalizeVastOffers(rows: unknown): VastOffer[] {
 }
 
 export const VAST_MODES = [
-  { id: 'image', label: 'Image', sub: 'Flux / Z-Image', disk: 120 },
-  { id: 'wan-native', label: 'Wan native', sub: 'Wan 2.2 I2V (no Comfy)', disk: 130 },
-  { id: 'video', label: 'Video', sub: 'Wan 2.2 Comfy', disk: 120 },
-  { id: 'ltx-native', label: 'LTX native', sub: 'LTX 2.3', disk: 120 },
-  { id: 'all', label: 'All stacks', sub: 'Image + video + LTX', disk: 150 },
+  { id: 'image', label: 'Image', sub: 'Flux / Z-Image', disk: 120, minHostDisk: 80, minVram: 16 },
+  { id: 'wan-native', label: 'Wan native', sub: 'Wan 2.2 I2V (no Comfy)', disk: 130, minHostDisk: 120, minVram: 24 },
+  { id: 'video', label: 'Video', sub: 'Wan 2.2 Comfy', disk: 120, minHostDisk: 90, minVram: 24 },
+  { id: 'ltx-native', label: 'LTX native', sub: 'LTX 2.3', disk: 120, minHostDisk: 120, minVram: 24 },
+  { id: 'all', label: 'All stacks', sub: 'Image + video + LTX', disk: 150, minHostDisk: 120, minVram: 24 },
 ] as const
 
 export type VastModeId = (typeof VAST_MODES)[number]['id']

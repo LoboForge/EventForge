@@ -27,18 +27,22 @@ fi
 (crontab -l 2>/dev/null | grep -v wan-agent-watchdog.sh || true
  echo '*/5 * * * * bash /workspace/wan-agent-watchdog.sh >> /workspace/wan-watchdog.log 2>&1') | crontab - 2>/dev/null || true
 
-if tmux has-session -t loboforge-agent 2>/dev/null; then
+WAN_ROOT="${WAN_MODEL_ROOT:-/workspace/wan-models}"
+PY="${PY:-/venv/main/bin/python3}"
+[[ -x "$PY" ]] || PY="$(command -v python3)"
+export PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"
+if ! "$PY" -c "from loboforge_worker.inference.wan.paths import i2v_ready, load_layout, wan_model_root; r=wan_model_root(); exit(0 if (load_layout(r) and i2v_ready(r)) else 1)" 2>/dev/null; then
+  echo "[$(date -Is)] watchdog: native Wan models not ready (layout/i2v) — skip agent launch" >> /workspace/wan-watchdog.log
   exit 0
 fi
 
-PY="${PY:-/venv/main/bin/python3}"
-[[ -x "$PY" ]] || PY="$(command -v python3)"
-
-WAN_ROOT="${WAN_MODEL_ROOT:-/workspace/wan-models}"
-if [[ ! -d "${WAN_ROOT}/Wan2.2-I2V-A14B/high_noise_model" ]] \
-   && [[ ! -f "${WAN_ROOT}/layout.json" ]]; then
-  echo "[$(date -Is)] watchdog: native Wan models not ready — skip agent launch" >> /workspace/wan-watchdog.log
-  exit 0
+if tmux has-session -t loboforge-agent 2>/dev/null; then
+  if ! pgrep -f 'loboforge_agent_eventforge' >/dev/null 2>&1; then
+    echo "[$(date -Is)] watchdog: stale loboforge-agent tmux (no agent pid) — killing session" >> /workspace/wan-watchdog.log
+    tmux kill-session -t loboforge-agent 2>/dev/null || true
+  else
+    exit 0
+  fi
 fi
 
 echo "[$(date -Is)] watchdog: agent tmux missing — reconnecting" >> /workspace/wan-watchdog.log

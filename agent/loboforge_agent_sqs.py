@@ -162,15 +162,24 @@ except ImportError:
                 caps.append("wan")
             if ltx23:
                 caps.append("ltx")
+            elif music:
+                caps.append("ltx")  # ACE-Step (legacy ltx capability queue)
             return tuple(caps or ("wan",))
         if mode_l == "music":
-            return ("wan",)
+            caps: list[str] = []
+            if music:
+                caps.append("ltx")
+            if wan:
+                caps.append("wan")
+            return tuple(caps or ("ltx",))
         if mode_l == "all":
             caps = ["flux-klein", "flux-klein-edit", "zimage", "chroma"]
             if wan:
                 caps.append("wan")
             if ltx23:
                 caps.append("ltx")
+            elif music:
+                caps.append("ltx")  # music only — no LTX23 video
             return tuple(caps)
         if mode_l in ("ltx-native", "ltx"):
             return ("ltx",)

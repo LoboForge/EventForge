@@ -78,7 +78,7 @@ export function OpsVastTab() {
       setOffer(rec.offer ? normalizeVastOffers([rec.offer])[0] : null)
       setInstances(normalizeVastInstances(inst))
       setAccount(acct ? normalizeVastAccount(acct) : null)
-      setSearch((s) => ({ ...s, minGpuRamGb: mode === 'video' || mode === 'all' || mode === 'ltx-native' ? 24 : 16 }))
+      setSearch((s) => ({ ...s, minGpuRamGb: mode === 'video' || mode === 'all' || mode === 'ltx-native' || mode === 'wan-native' ? 24 : 16 }))
       void modeCfg
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -94,7 +94,7 @@ export function OpsVastTab() {
       const rows = await opsFetch<unknown[]>('/v1/ops/vast/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(search),
+        body: JSON.stringify({ ...search, mode }),
       })
       setSearchResults(normalizeVastOffers(rows))
     } catch (ex) {

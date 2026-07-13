@@ -656,14 +656,24 @@ async def get_available_models(comfyui_url: str) -> dict:
     Query ComfyUI for all available models across all loader types.
     Returns a dict of lists — full paths as ComfyUI knows them.
     """
+    empty = {
+        "unets": [],
+        "checkpoints": [],
+        "loras": [],
+        "vaes": [],
+        "clips": [],
+        "ggufs": [],
+        "text_encoders": [],
+        "latent_upscale_models": [],
+    }
     if _is_skip_comfy():
         if _is_native_wan_box():
             inv = await _native_wan_inventory()
-            if inv:
-                return inv
+            return inv if inv else empty
         inv = await _native_ltx_inventory()
         if inv:
             return inv
+        return empty
 
     result = {
         "unets": [],

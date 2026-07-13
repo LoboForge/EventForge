@@ -321,12 +321,12 @@ async def process_ef_job(
 
     if not worker_can_run_assign(state, assign, hostname=args.hostname, capability=capability):
         model_name = (assign.get("model") or "?").strip()
-        msg = (
-            f"server assigned job {job_id[:8]} with model {model_name} "
-            f"but worker check-in did not report readiness — claim gate bug"
+        log.info(
+            "Releasing job %s — model %s not runnable on this worker",
+            job_id[:8],
+            model_name,
         )
-        log.error(msg)
-        await ef_fail(http, ef_base, worker_key, job_id, msg)
+        await ef_release(http, ef_base, worker_key, job_id)
         return
 
     loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
@@ -375,6 +375,9 @@ async def process_ef_job(
         reason = session.failed_reason
         if reason.startswith("Text encoder not on worker"):
             log.info("Releasing job %s — %s", job_id[:8], reason)
+            await ef_release(http, ef_base, worker_key, job_id)
+        elif "not provisioned" in reason.lower() or "layout.json missing" in reason.lower():
+            log.warning("Releasing job %s — worker not ready: %s", job_id[:8], reason)
             await ef_release(http, ef_base, worker_key, job_id)
         else:
             await ef_fail(http, ef_base, worker_key, job_id, reason)

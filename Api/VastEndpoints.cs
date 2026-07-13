@@ -37,7 +37,9 @@ public static class VastEndpoints
         {
             if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
                 return Results.Unauthorized();
-            var offers = await SearchFilteredAsync(vast, q, ct);
+            var mode = VastAiDiskRequirements.NormalizeMode(q.Mode);
+            q.MinGpuRamGb = Math.Max(q.MinGpuRamGb, VastAiDiskRequirements.MinimumVramGb(mode));
+            var offers = await SearchFilteredAsync(vast, q, ct, VastAiDiskRequirements.MinimumHostDiskGb(mode));
             return Results.Ok(offers);
         });
 
@@ -52,7 +54,7 @@ public static class VastEndpoints
         {
             if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
                 return Results.Unauthorized();
-            var minVram = mode switch { "video" or "all" or "ltx-native" or "wan-native" => 24, _ => 16 };
+            var minVram = VastAiDiskRequirements.MinimumVramGb(mode);
             var q = new SearchQuery
             {
                 MinGpuRamGb = minVram,
@@ -102,6 +104,40 @@ public static class VastEndpoints
                 return Results.Unauthorized();
             if (!vast.IsConfigured) return Results.StatusCode(503);
             if (body.OfferId <= 0) return Results.BadRequest(new { error = "OfferId required." });
+            var rentMode = VastAiDiskRequirements.NormalizeMode(body.Mode);
+            var minHostDisk = VastAiDiskRequirements.MinimumHostDiskGb(rentMode);
+            var minVramGb = VastAiDiskRequirements.MinimumVramGb(rentMode);
+            var offerCheck = new SearchQuery
+            {
+                MinGpuRamGb = minVramGb,
+                MaxDollarsPerHr = 999m,
+                MinReliability = 0m,
+                VerifiedOnly = false,
+                Limit = 250,
+            };
+            var candidates = await SearchFilteredAsync(vast, offerCheck, ct, minHostDisk);
+            var picked = candidates.FirstOrDefault(o => o.Id == body.OfferId);
+            if (picked == null)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Offer {body.OfferId} unavailable or below {rentMode} requirements (host disk ≥{minHostDisk}GB, VRAM ≥{minVramGb}GB).",
+                });
+            }
+            if (picked.DiskSpace > 0 && picked.DiskSpace < minHostDisk)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Offer host disk {picked.DiskSpace:0}GB is below {rentMode} minimum {minHostDisk}GB.",
+                });
+            }
+            if (picked.GpuRamMb > 0 && picked.GpuRamMb < minVramGb * 1024L)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Offer GPU VRAM {(picked.GpuRamMb / 1024.0):0}GB is below {rentMode} minimum {minVramGb}GB.",
+                });
+            }
             var ef = opts.Value;
             var p = new CreateInstanceParams
             {
@@ -177,6 +213,7 @@ public static class VastEndpoints
 
     public class SearchQuery
     {
+        public string Mode { get; set; } = "image";
         public int MinGpuRamGb { get; set; } = 16;
         public decimal MaxDollarsPerHr { get; set; } = 0.75m;
         public decimal MinReliability { get; set; } = 0.95m;

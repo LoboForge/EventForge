@@ -26,7 +26,14 @@ public static class WorkerContribution
         var isGen = hn.Contains("loboforge-image")
             || hn.Contains("loboforge-video")
             || hn.Contains("loboforge-ltx")
+            || hn.Contains("loboforge-wan")
             || hn.Contains("loboforge-ollama");
+
+        if (w.DiskFreeMb is > 0 and < 12_000 && (hn.Contains("wan") || hn.Contains("video") || hn.Contains("image") || hn.Contains("all")))
+            badges.Add("disk-low");
+
+        if (hn.Contains("wan-native") && !w.Busy && w.ClaimReadyCapabilities.Count == 0 && !w.CheckInStale)
+            badges.Add("wan-not-ready");
 
         if (isGen && !w.Busy && w.ClaimReadyCapabilities.Count == 0 && !w.CheckInStale)
             badges.Add("no-claim-ready");

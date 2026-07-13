@@ -131,8 +131,39 @@ def resolve_lora_sync_mode(hostname: str | None = None) -> str:
     return "all"
 
 
+def _native_wan_layout_ready() -> bool:
+    """Native Wan boxes must not poll/claim until layout.json exists and I2V weights are on disk."""
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    executor = os.environ.get("LOBO_EXECUTOR", "").strip().lower()
+    hn = (os.environ.get("LOBO_HOSTNAME") or os.environ.get("HN") or "").lower()
+    native_box = (
+        mode == "wan-native"
+        or executor == "native"
+        or "wan-native" in hn
+        or hn.startswith("loboforge-wan-")
+    )
+    if not native_box:
+        return True
+    wan_root = (os.environ.get("WAN_MODEL_ROOT") or "/workspace/wan-models").strip()
+    try:
+        from loboforge_worker.inference.wan.paths import i2v_ready, load_layout, wan_model_root
+
+        root = Path(wan_root) if wan_root else wan_model_root()
+        return load_layout(root) is not None and i2v_ready(root)
+    except ImportError:
+        return Path(wan_root, "layout.json").is_file()
+
+
 def _find_comfy_models_root() -> Path | None:
     """ComfyUI models tree — used for LoRA sync from loboforge.com active-loras."""
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    wan_root = os.environ.get("WAN_MODEL_ROOT", "").strip()
+    if mode == "wan-native" or (
+        os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
+    ):
+        p = Path(wan_root)
+        if p.is_dir():
+            return p
     for candidate in (
         "/opt/workspace-internal/ComfyUI/models",
         "/workspace/ComfyUI/models",
@@ -158,15 +189,23 @@ def _find_comfy_models_root() -> Path | None:
         mp = Path(models_env)
         if mp.is_dir():
             return mp if mp.name == "models" else mp / "models"
-    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
-    wan_root = os.environ.get("WAN_MODEL_ROOT", "").strip()
-    if mode == "wan-native" or (
-        os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
-    ):
-        p = Path(wan_root)
-        if p.is_dir():
-            return p
     return None
+
+
+def _native_wan_lora_dirs() -> list[Path]:
+    """Directories where native Wan user LoRAs may live on disk."""
+    dirs: list[Path] = []
+    wan_root = (os.environ.get("WAN_MODEL_ROOT") or "").strip()
+    if wan_root:
+        dirs.append(Path(wan_root) / "loras")
+    for candidate in (
+        "/opt/workspace-internal/ComfyUI/models/loras",
+        "/workspace/ComfyUI/models/loras",
+    ):
+        p = Path(candidate)
+        if p.is_dir():
+            dirs.append(p)
+    return dirs
 
 
 def sync_hub_active_loras(args: argparse.Namespace, mode: str | None = None) -> dict[str, Any]:
@@ -313,6 +352,14 @@ def worker_has_lora(state: dict, lora_name: str) -> bool:
     for k in (state.get("models") or {}).get("loras") or []:
         if _lora_basenames_match(k, target):
             return True
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    if mode == "wan-native" or os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native":
+        for d in _native_wan_lora_dirs():
+            if (d / target).is_file() or (d / lora_name).is_file():
+                return True
+            for f in d.glob("*.safetensors"):
+                if _lora_basenames_match(f.name, target):
+                    return True
     return False
 
 
@@ -351,7 +398,7 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "vram_total": gpu_info.get("vram_total", 0),
         "vram_free": agent.get_vram_free(),
         "disk_free_mb": agent.get_disk_free_mb(),
-        "models": models,
+        "models": _models_for_check_in(models),
         "known_loras": agent_state.get("known_loras", []),
         "busy": agent.agent_fleet_busy(agent_state),
         "current_job_uuid": agent_state.get("current_job"),
@@ -371,6 +418,21 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
     return payload
 
 
+def _env_flag(name: str, *, default: bool = True) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
+
+
+def _ltx23_enabled() -> bool:
+    return _env_flag("LOBO_LTX23", default=False)
+
+
+def _music_enabled() -> bool:
+    return _env_flag("LOBO_MUSIC", default=True)
+
+
 def _model_assets(state: dict) -> list[str]:
     models = state.get("models") or {}
     assets: list[str] = []
@@ -379,6 +441,22 @@ def _model_assets(state: dict) -> list[str]:
             if isinstance(name, str) and name.strip():
                 assets.append(name.strip())
     return assets
+
+
+def _models_for_check_in(models: dict) -> dict:
+    """Omit LTX weights from check-in when LOBO_LTX23=0 so claim gate skips ltx23 jobs."""
+    if _ltx23_enabled() or not models:
+        return models
+    filtered: dict[str, Any] = {}
+    for key, names in models.items():
+        if not isinstance(names, list):
+            filtered[key] = names
+            continue
+        filtered[key] = [
+            n for n in names
+            if isinstance(n, str) and n.strip() and not _looks_like_ltx_asset(n)
+        ]
+    return filtered
 
 
 def _hostname_is_image_only(hostname: str | None) -> bool:
@@ -489,8 +567,10 @@ def worker_can_run_model(
             return False
         return _has_wan_i2v(models)
 
-    if lower.startswith("ltx23") or lower == "ltx23":
+    if lower.startswith("ltx") and lower not in ("music", "ace-step"):
         if image_only:
+            return False
+        if not _ltx23_enabled():
             return False
         return any(_looks_like_ltx_asset(m) for m in assets)
 
@@ -571,12 +651,10 @@ def worker_can_poll_capability(
     cap = (capability or "").strip().lower()
     if not cap:
         return False
-    if cap == "ltx" and _hostname_is_wan_or_video_only(hostname):
-        import os
-        ltx23 = (os.environ.get("LOBO_LTX23") or "0").strip().lower() not in ("0", "false", "no", "off")
-        music = (os.environ.get("LOBO_MUSIC") or "1").strip().lower() not in ("0", "false", "no", "off")
-        if music and not ltx23:
-            return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
+    if cap == "wan" and not _native_wan_layout_ready():
+        return False
+    if cap == "ltx" and _music_enabled() and not _ltx23_enabled():
+        return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
     probe = _CAPABILITY_PROBE_MODEL.get(cap)
     if not probe:
         return True

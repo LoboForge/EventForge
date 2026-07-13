@@ -10,6 +10,14 @@ unset _lf_ops_ssh
 mkdir -p /workspace
 cd /workspace
 
+# Fail fast before any downloads — tiny Vast containers wedge at ~32–45GB.
+WAN_NEED_GB=120
+WAN_TOTAL_GB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print int($2/1024)}' || echo "")
+if [[ -n "$WAN_TOTAL_GB" && "$WAN_TOTAL_GB" =~ ^[0-9]+$ && "$WAN_TOTAL_GB" -lt "$WAN_NEED_GB" ]]; then
+  echo "FATAL: Container disk ${WAN_TOTAL_GB}GB < ${WAN_NEED_GB}GB required for wan-native (models ~30GB + venv + headroom). Re-rent with disk≥130GB on host≥120GB." | tee -a /workspace/provision.log
+  exit 1
+fi
+
 export LOBO_EXECUTOR="${LOBO_EXECUTOR:-native}"
 export LOBO_SKIP_COMFY="${LOBO_SKIP_COMFY:-1}"
 export LOBO_WAN="${LOBO_WAN:-1}"
@@ -94,6 +102,28 @@ if [[ -f /tmp/loboforge_worker.tar.gz ]]; then
   "$PY" -c "import loboforge_worker"
 fi
 
+# Disk + GPU gates (fatal — matches provision_gpu.sh / bootstrap_box.py).
+"$PY" - <<'PY' || { echo "FATAL: disk preflight failed" | tee -a /workspace/provision.log; exit 1; }
+import os, sys
+from loboforge_worker.provision.disk import disk_preflight
+d = disk_preflight(
+    "wan-native",
+    label=os.environ.get("LOBO_LABEL", ""),
+    hostname=os.environ.get("LOBO_HOSTNAME", ""),
+)
+if not d.get("ok"):
+    print(d.get("error") or "disk preflight failed", file=sys.stderr)
+    sys.exit(1)
+print(f"disk ok: {d.get('total_gb')}GB total need>={d.get('need_gb')}GB")
+PY
+
+"$PY" -m loboforge_worker preflight-gpu \
+  --secret "$LOBO_SECRET" \
+  --mode wan-native \
+  --instance-id "$LOBO_INSTANCE_ID" \
+  2>&1 | tee -a /workspace/provision.log \
+  || { echo "FATAL: GPU preflight failed" | tee -a /workspace/provision.log; exit 1; }
+
 for agent_file in loboforge_agent_eventforge.py loboforge_agent_sqs.py loboforge_agent_common.py loboforge_agent.py; do
   fetched=""
   for agent_url in "${EF_BASE}/agent/${agent_file}" "${BASE}/agent/${agent_file}"; do
@@ -118,7 +148,7 @@ if ! "$PY" -m loboforge_worker provision-wan-native --help 2>/dev/null | grep -q
   exit 1
 fi
 
-# Early fleet join — warn-only so background downloads always start.
+# Early fleet join — fatal on GPU/disk incompatibility so Vast box does not burn queue jobs.
 if ! "$PY" -m loboforge_worker provision-wan-native --connect-only \
   --secret "$LOBO_SECRET" \
   --server "${LOBO_SERVER:-wss://www.loboforge.com}" \
@@ -127,7 +157,8 @@ if ! "$PY" -m loboforge_worker provision-wan-native --connect-only \
   --label "${LOBO_LABEL:-loboforge-wan-native}" \
   --hf-token "$HF_TOKEN" \
   2>&1 | tee -a /workspace/provision.log; then
-  echo "WARN: connect-only failed — watchdog will retry agent launch" | tee -a /workspace/provision.log
+  echo "FATAL: wan-native connect-only failed (GPU/disk/models)" | tee -a /workspace/provision.log
+  exit 1
 fi
 
 nohup "$PY" -m loboforge_worker provision-wan-native --skip-agent-launch \

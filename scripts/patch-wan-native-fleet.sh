@@ -106,6 +106,9 @@ if [[ -f /workspace/wan-models/layout.json ]]; then
   echo "wan-models=$(du -sh /workspace/wan-models | awk '{print $1}') layout=ok"
 else
   echo "wan-models=$(du -sh /workspace/wan-models 2>/dev/null | awk '{print $1}' || echo missing) layout=pending"
+  if "$PY" -c "from loboforge_worker.inference.wan.paths import i2v_ready, write_layout, wan_model_root, wan_repo_root; r=wan_model_root(); i2v_ready(r) and write_layout(r, repo=wan_repo_root())" 2>/dev/null; then
+    echo "layout.json written (models were ready)"
+  fi
 fi
 pgrep -af 'provision-wan-native|loboforge_agent' | head -4 || true
 tail -2 /workspace/lora-sync.log 2>/dev/null || true

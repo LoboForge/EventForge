@@ -17,11 +17,18 @@ public static class VastAiDiskRequirements
         _       => 120, // image (+ Chroma ~68GB models)
     };
 
+    /// <summary>Minimum GPU VRAM for offer search / rent validation (GB).</summary>
+    public static int MinimumVramGb(string? mode) => NormalizeMode(mode) switch
+    {
+        "ltx-native" or "wan-native" or "video" or "all" => 24,
+        _ => 16,
+    };
+
     /// <summary>Minimum container disk to request on rent (GB).</summary>
     public static int MinimumRentDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 100,
-        "wan-native" => 100,
+        "wan-native" => 120,
         "video" => 80,
         "music" => 50,
         "all"   => 120,
