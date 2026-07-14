@@ -146,14 +146,34 @@ public sealed class JobService
         };
     }
 
-    /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).</summary>
+    /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).
+    /// Also reclaim if the job fell back to queued mid-run (ECS restart / missed lease renew).</summary>
     public async Task<bool> ExtendLeaseOnCheckInAsync(string workerId, string? jobUuid, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(workerId) || string.IsNullOrWhiteSpace(jobUuid)) return false;
-        var job = await _persist.TryGetJobAsync(jobUuid.Trim(), ct);
-        if (job == null || !string.Equals(job.WorkerId, workerId, StringComparison.OrdinalIgnoreCase)) return false;
+        var id = jobUuid.Trim();
+        var job = await _persist.TryGetJobAsync(id, ct);
+        if (job == null) return false;
+
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
-        return _queue.TryExtendLease(jobUuid.Trim(), workerId, lease);
+        if (string.Equals(job.WorkerId, workerId, StringComparison.OrdinalIgnoreCase)
+            && job.Status is JobStatus.Leased or JobStatus.Streaming)
+            return _queue.TryExtendLease(id, workerId, lease);
+
+        // Worker still holds the job but queue lost the lease (restart / timeout race).
+        if (job.Status == JobStatus.Queued)
+        {
+            var worker = _fleet.TryGetWorkerBusyOnJob(workerId, id);
+            if (worker == null) return false;
+            if (!_queue.TryReclaimIfQueued(id, workerId, worker.Hostname, lease)) return false;
+            _persist.MarkDirty();
+            _log.LogWarning(
+                "Reclaimed orphaned in-flight job {Job} on check-in worker={Worker} host={Host}",
+                id, workerId, worker.Hostname);
+            return true;
+        }
+
+        return false;
     }
 
     private async Task<JobRecord?> ResolveJobForWorkerAsync(string jobId, string workerId, CancellationToken ct)
