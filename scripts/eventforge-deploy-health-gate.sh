@@ -16,7 +16,9 @@ html=$(curl -sf --max-time 30 "${BASE_URL}/")
 echo "$html" | grep -q 'assets/index-' || { echo "index.html missing vite assets"; exit 1; }
 
 step "GET ${BASE_URL}/agent/provision_worker.sh"
-curl -sf --max-time 30 "${BASE_URL}/agent/provision_worker.sh" | head -1 | grep -q '#!/' \
+# Avoid `curl | head` under `pipefail` (SIGPIPE → exit 141 even when content is fine).
+agent_script=$(curl -sf --max-time 30 "${BASE_URL}/agent/provision_worker.sh")
+printf '%s\n' "$agent_script" | head -1 | grep -q '#!/' \
   || { echo "agent bootstrap script missing"; exit 1; }
 
 if [[ -n "$EXPECT_COMMIT" ]]; then
