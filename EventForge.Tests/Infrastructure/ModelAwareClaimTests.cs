@@ -57,6 +57,31 @@ public sealed class WorkerModelCompatibilityTests
     }
 
     [Fact]
+    public void CanRunModel_blocks_wan2_when_only_high_noise_unet_present()
+    {
+        var assets = WorkerModelAssets.FromJson("""
+            {"unets":["Wan2.2/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"]}
+            """);
+        WorkerModelCompatibility.CanRunModel(assets, "wan2", "loboforge-all-44655344", "wan")
+            .Should().BeFalse();
+        WorkerModelCompatibility.CanRunModel(assets, "wan2flf", "loboforge-all-44655344", "wan")
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void CanRunModel_allows_wan2_when_high_and_low_noise_unets_present()
+    {
+        var assets = WorkerModelAssets.FromJson("""
+            {"unets":[
+              "Wan2.2/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+              "Wan2.2/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+            ]}
+            """);
+        WorkerModelCompatibility.CanRunModel(assets, "wan2", "loboforge-all-44655344", "wan")
+            .Should().BeTrue();
+    }
+
+    [Fact]
     public void CanRunModel_allows_joycaption_on_joycaption_hostname_without_assets()
     {
         var assets = WorkerModelAssets.FromJson("{}");

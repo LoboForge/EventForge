@@ -172,20 +172,40 @@ public static class WorkerModelCompatibility
         assets.Assets.Any(m => m.Contains("gpt_oss", StringComparison.OrdinalIgnoreCase));
 
     private static bool HasWanI2V(WorkerModelAssets assets) =>
-        assets.Unets.Any(m =>
-        {
-            var ml = m.ToLowerInvariant();
-            return ml.Contains("wan") && ml.Contains("i2v");
-        });
+        WanNoisePairPresent(assets.Unets, i2v: true);
 
     private static bool HasWanT2V(WorkerModelAssets assets) =>
-        assets.Unets.Any(m =>
+        WanNoisePairPresent(assets.Unets, i2v: false);
+
+    /// <summary>
+    /// Wan 2.2 MoE needs both high- and low-noise UNETs. High-only inventory caused
+    /// Comfy prompt_outputs_failed_validation (low_noise unet_name not in list).
+    /// </summary>
+    private static bool WanNoisePairPresent(IEnumerable<string> unets, bool i2v)
+    {
+        var matched = new List<string>();
+        foreach (var m in unets)
         {
+            if (string.IsNullOrWhiteSpace(m)) continue;
             var ml = m.ToLowerInvariant();
-            return (ml.Contains("wan") && ml.Contains("t2v"))
-                   || ml.Contains("t2v_low_noise")
-                   || ml.Contains("wan2.2_t2v");
-        });
+            if (i2v)
+            {
+                if (ml.Contains("wan") && ml.Contains("i2v"))
+                    matched.Add(ml);
+            }
+            else if ((ml.Contains("wan") && ml.Contains("t2v"))
+                     || ml.Contains("t2v_low_noise")
+                     || ml.Contains("wan2.2_t2v"))
+            {
+                matched.Add(ml);
+            }
+        }
+
+        if (matched.Count == 0) return false;
+        var hasHigh = matched.Any(u => u.Contains("high_noise") || u.Contains("high-noise"));
+        var hasLow = matched.Any(u => u.Contains("low_noise") || u.Contains("low-noise"));
+        return hasHigh && hasLow;
+    }
 
     private static bool HasAceStep(WorkerModelAssets assets) =>
         assets.Assets.Any(m =>
