@@ -632,9 +632,14 @@ public static class OpsEndpoints
 
 public sealed class PurgeQueuedRequest
 {
+    // Ops UI and curl docs use snake_case; ASP.NET defaults to camelCase (appId).
+    [JsonPropertyName("app_id")]
     public string AppId { get; set; } = "";
+    [JsonPropertyName("capability")]
     public string? Capability { get; set; }
+    [JsonPropertyName("include_in_flight")]
     public bool IncludeInFlight { get; set; } = true;
+    [JsonPropertyName("delete_s3")]
     public bool DeleteS3 { get; set; } = true;
 }
 
