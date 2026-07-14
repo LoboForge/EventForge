@@ -343,15 +343,15 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
   }
 
   async function purgeQueued(appId: string) {
-    if (!confirm(`Purge all queued jobs for ${appId}?`)) return
+    if (!confirm(`Purge all queued jobs for ${appId}? This also deletes S3 job artifacts (inputs/outputs) for those jobs.`)) return
     setBusy(`purge:${appId}`)
     setErr(null)
     try {
       const r = await opsFetch<{ removed: number }>('/v1/ops/jobs/purge-queued', {
         method: 'POST',
-        body: JSON.stringify({ app_id: appId, include_in_flight: false, delete_s3: false }),
+        body: JSON.stringify({ app_id: appId, include_in_flight: false, delete_s3: true }),
       })
-      setMsg(`Removed ${r.removed} queued job(s) for ${appId}`)
+      setMsg(`Removed ${r.removed} queued job(s) for ${appId} (S3 artifacts deleted)`)
       onRefresh()
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
