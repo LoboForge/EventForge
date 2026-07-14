@@ -76,9 +76,12 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
 
         try
         {
+            SqliteConnection.ClearAllPools();
+            SqliteConnectionFactory.DeleteSidecarFiles(DatabasePath);
             using var resp = await _s3!.GetObjectAsync(bucket, restoreKey, ct);
             await using var fs = File.Create(DatabasePath);
             await resp.ResponseStream.CopyToAsync(fs, ct);
+            SqliteConnection.ClearAllPools();
             var jobs = await SqliteStoreStats.CountJobsAsync(DatabasePath, ct);
             _log.LogInformation(
                 "EventForge SQLite restored from s3://{Bucket}/{Key} ({Jobs} jobs, {Bytes} bytes)",
@@ -113,7 +116,7 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
             : 0;
         var priorLocalBytes = SqliteStoreStats.FileBytes(DatabasePath);
 
-        var tempPath = DatabasePath + ".restore";
+        var tempPath = Path.Combine(Path.GetTempPath(), $"eventforge-restore-{Guid.NewGuid():N}.db");
         try
         {
             using var resp = await _s3!.GetObjectAsync(bucket, restoreKey, ct);
@@ -122,7 +125,7 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
 
             var restoredJobs = await SqliteStoreStats.CountJobsAsync(tempPath, ct);
             var restoredBytes = SqliteStoreStats.FileBytes(tempPath);
-            File.Copy(tempPath, DatabasePath, overwrite: true);
+            SqliteConnectionFactory.ReplaceDatabaseFile(tempPath, DatabasePath);
 
             _log.LogWarning(
                 "EventForge force-restored SQLite from s3://{Bucket}/{Key} ({Jobs} jobs, {Bytes} bytes; replaced local_jobs={LocalJobs})",
@@ -145,10 +148,7 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
         }
         finally
         {
-            if (File.Exists(tempPath))
-            {
-                try { File.Delete(tempPath); } catch { /* ignore */ }
-            }
+            TryDelete(tempPath);
         }
     }
 
@@ -191,17 +191,12 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
             };
         }
 
-        var tempPath = DatabasePath + ".backup";
+        // Unique path under /tmp — never DatabasePath+".backup" (sibling dest + pooling → SQLITE 1032).
+        var tempPath = Path.Combine(Path.GetTempPath(), $"eventforge-backup-{Guid.NewGuid():N}.db");
         string? datedKey = null;
         try
         {
-            await using (var source = new SqliteConnection($"Data Source={DatabasePath}"))
-            {
-                await source.OpenAsync(ct);
-                await using var dest = new SqliteConnection($"Data Source={tempPath}");
-                await dest.OpenAsync(ct);
-                source.BackupDatabase(dest);
-            }
+            await CreateConsistentSnapshotAsync(DatabasePath, tempPath, ct);
 
             if (remoteBytes > 0)
                 datedKey = await CopyRemoteToDatedBackupAsync(bucket, key, ct);
@@ -244,11 +239,55 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
         }
         finally
         {
-            if (File.Exists(tempPath))
-            {
-                try { File.Delete(tempPath); } catch { /* ignore */ }
-            }
+            TryDelete(tempPath);
+            // Leftover sibling from older builds that poisoned BackupDatabase.
+            TryDelete(DatabasePath + ".backup");
+            TryDelete(DatabasePath + ".backup-wal");
+            TryDelete(DatabasePath + ".backup-shm");
         }
+    }
+
+    /// <summary>
+    /// Hot-copy the live store into <paramref name="destPath"/> using the online backup API
+    /// with unpooled connections. Falls back to WAL checkpoint + file copy if needed.
+    /// </summary>
+    internal static async Task CreateConsistentSnapshotAsync(string sourcePath, string destPath, CancellationToken ct)
+    {
+        TryDelete(destPath);
+        SqliteConnectionFactory.DeleteSidecarFiles(destPath);
+
+        try
+        {
+            await using var source = SqliteConnectionFactory.OpenUnpooled(sourcePath, SqliteOpenMode.ReadWrite);
+            await using var dest = SqliteConnectionFactory.OpenUnpooled(destPath, SqliteOpenMode.ReadWriteCreate);
+            await source.OpenAsync(ct);
+            await dest.OpenAsync(ct);
+            source.BackupDatabase(dest);
+            return;
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is 8 or 1032)
+        {
+            // SQLITE_READONLY / SQLITE_READONLY_DBMOVED — retry via checkpoint + copy.
+        }
+
+        await using (var source = SqliteConnectionFactory.OpenUnpooled(sourcePath, SqliteOpenMode.ReadWrite))
+        {
+            await source.OpenAsync(ct);
+            await using var checkpoint = source.CreateCommand();
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            await checkpoint.ExecuteNonQueryAsync(ct);
+        }
+
+        SqliteConnection.ClearAllPools();
+        File.Copy(sourcePath, destPath, overwrite: true);
+        SqliteConnectionFactory.DeleteSidecarFiles(destPath);
+    }
+
+    private static void TryDelete(string path)
+    {
+        if (!File.Exists(path)) return;
+        try { File.Delete(path); }
+        catch { /* ignore */ }
     }
 
     private async Task<string?> PickBestRestoreKeyAsync(string bucket, string primaryKey, CancellationToken ct)
@@ -327,7 +366,7 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
 
     private async Task<int> InspectRemoteJobsAsync(string bucket, string key, CancellationToken ct)
     {
-        var temp = Path.GetTempFileName();
+        var temp = Path.Combine(Path.GetTempPath(), $"eventforge-inspect-{Guid.NewGuid():N}.db");
         try
         {
             using var resp = await _s3!.GetObjectAsync(bucket, key, ct);
@@ -341,10 +380,7 @@ public sealed class SqliteS3Persistence : ISqliteS3Persistence, IDisposable
         }
         finally
         {
-            if (File.Exists(temp))
-            {
-                try { File.Delete(temp); } catch { /* ignore */ }
-            }
+            TryDelete(temp);
         }
     }
 

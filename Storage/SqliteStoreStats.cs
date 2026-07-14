@@ -26,5 +26,5 @@ public static class SqliteStoreStats
         File.Exists(path) ? new FileInfo(path).Length : 0;
 
     private static SqliteConnection Open(string path) =>
-        new(new SqliteConnectionStringBuilder { DataSource = path }.ConnectionString);
+        SqliteConnectionFactory.OpenUnpooled(path, SqliteOpenMode.ReadOnly);
 }

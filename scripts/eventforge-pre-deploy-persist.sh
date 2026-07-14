@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Flush EventForge in-memory queue to SQLite and upload a guarded S3 snapshot before ECS roll.
+# Relies on POST /v1/ops/jobs/flush-backup which hot-copies SQLite to a /tmp snapshot then uploads.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -54,10 +55,38 @@ UPLOADED=$(echo "$RESP" | python3 -c "import json,sys; print('yes' if json.load(
 SKIPPED=$(echo "$RESP" | python3 -c "import json,sys; print('yes' if json.load(sys.stdin).get('backup_skipped') else 'no')")
 JOBS=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobs_total',0))")
 LOCAL_JOBS=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('local_job_count',0))")
+REMOTE_JOBS=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('remote_job_count',0) or 0)")
 
 if [[ "$UPLOADED" == "yes" ]]; then
   echo "✓ S3 snapshot uploaded (${LOCAL_JOBS} jobs in SQLite)"
   exit 0
+fi
+
+# Allow roll when S3 already holds a near-current snapshot (covers chicken-egg when the
+# running task's hot-copy is broken but remote already matches local/memory).
+if [[ "$SKIPPED" == "yes" && "$REMOTE_JOBS" -ge "$MIN_JOBS" ]]; then
+  if python3 - "$MIN_JOBS" /tmp/ef-flush-backup.json <<'PY'
+import json, sys
+min_jobs = int(sys.argv[1])
+with open(sys.argv[2]) as f:
+    d = json.load(f)
+jobs = int(d.get("jobs_total") or 0)
+local = int(d.get("local_job_count") or 0)
+remote = int(d.get("remote_job_count") or 0)
+reason = str(d.get("backup_skip_reason") or "")
+if remote < min_jobs or remote < jobs:
+    sys.exit(1)
+if local > 0 and remote < int(local * 0.95):
+    sys.exit(1)
+print(
+    f"⚠ backup_skipped ({reason[:120]}) but S3 already has {remote} jobs "
+    f"(>= memory {jobs}, ~local {local}) — allowing deploy"
+)
+sys.exit(0)
+PY
+  then
+    exit 0
+  fi
 fi
 
 if [[ "$SKIPPED" == "yes" && "$JOBS" -ge "$MIN_JOBS" ]]; then
