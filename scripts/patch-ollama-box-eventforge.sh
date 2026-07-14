@@ -54,7 +54,7 @@ grep -q "^export FORGE_QUEUE_CAPABILITY=" "$ENV_FILE" 2>/dev/null && sed -i 's|^
 grep -q "^export LOBO_GEN_QUEUE=" "$ENV_FILE" 2>/dev/null && sed -i 's|^export LOBO_GEN_QUEUE=.*|export LOBO_GEN_QUEUE="eventforge"|' "$ENV_FILE" || echo 'export LOBO_GEN_QUEUE="eventforge"' >> "$ENV_FILE"
 grep -q "^export LOBO_LABEL=" "$ENV_FILE" 2>/dev/null || echo 'export LOBO_LABEL="loboforge-ollama"' >> "$ENV_FILE"
 grep -q "^export LOBO_INSTANCE_ID=" "$ENV_FILE" 2>/dev/null || echo 'export LOBO_INSTANCE_ID="42600549"' >> "$ENV_FILE"
-"$PY" -m pip install -q -U aiohttp
+"$PY" -m pip install -q -U aiohttp boto3
 chmod +x /workspace/vast-ollama-eventforge-agent-loop.sh
 tmux kill-session -t loboforge-ollama-agent 2>/dev/null || true
 pkill -f 'loboforge_ollama_agent' 2>/dev/null || true

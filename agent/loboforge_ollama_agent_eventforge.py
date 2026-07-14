@@ -12,7 +12,10 @@ Env:
     OLLAMA_HOST           — local Ollama HTTP base
 
 Requirements:
-    pip install aiohttp
+    pip install aiohttp boto3
+
+Env (S3 payload hydration — same as forge-queue gen workers):
+    FORGE_QUEUE_BUCKET / FORGE_QUEUE_REGION / AWS_* credentials
 """
 
 from __future__ import annotations
@@ -32,6 +35,33 @@ from typing import Any
 import aiohttp
 
 log = logging.getLogger("ollama-agent-ef")
+
+
+def load_payload_from_s3(key: str) -> dict[str, Any] | None:
+    """Load forge-queue chat payload (same S3 layout as gen / SQS dolphin jobs)."""
+    bucket = os.environ.get("FORGE_QUEUE_BUCKET", "").strip()
+    if not bucket:
+        log.warning("FORGE_QUEUE_BUCKET unset — cannot load %s", key)
+        return None
+    try:
+        import boto3
+    except ImportError:
+        log.warning("boto3 not installed — cannot load %s", key)
+        return None
+    region = (
+        os.environ.get("FORGE_QUEUE_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "us-east-2"
+    ).strip()
+    try:
+        s3 = boto3.client("s3", region_name=region)
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read())
+        return data if isinstance(data, dict) else None
+    except Exception as ex:
+        log.warning("S3 payload load failed for %s: %s", key, ex)
+        return None
+
 
 DEFAULT_EF = os.environ.get("EVENT_FORGE_URL", "http://localhost:8090").rstrip("/")
 DEFAULT_WORKER_KEY = os.environ.get("EVENT_FORGE_WORKER_KEY", "wrath-worker-key")
@@ -345,6 +375,21 @@ async def process_job(
             else:
                 await ef.fail(job_id, f"Unsupported payload type: {job_type or 'missing'}")
                 return
+
+        # LoboForge enqueues `{ type, request_id, payload_key }` with messages in S3.
+        payload_key = str(raw.get("payload_key") or "").strip()
+        if payload_key and not raw.get("messages"):
+            loaded = await asyncio.to_thread(load_payload_from_s3, payload_key)
+            if not isinstance(loaded, dict):
+                await ef.fail(job_id, f"Failed to load roleplay payload from S3 ({payload_key})")
+                return
+            raw = loaded
+            log.info(
+                "[%s] hydrated payload_key=%s messages=%d",
+                job_id[:8],
+                payload_key,
+                len(raw.get("messages") or []) if isinstance(raw.get("messages"), list) else 0,
+            )
 
         status, result = await run_chat_job(raw, job_id, args, ef, active_model, models)
         if status == "failed":

@@ -37,9 +37,14 @@ public static class JobEndpoints
             var kind = root.TryGetProperty("kind", out var k) ? k.GetString() ?? JobKind.Image : JobKind.Image;
             var payload = root.TryGetProperty("payload", out var p) ? p : root;
             string? jobId = root.TryGetProperty("job_id", out var j) ? j.GetString() : null;
-            int? queuePriority = root.TryGetProperty("queue_priority", out var qp) && qp.TryGetInt32(out var qpv)
-                ? qpv
-                : null;
+            // Ignore null/non-number queue_priority (LoboForge sends null) — TryGetInt32 alone can fault.
+            int? queuePriority = null;
+            if (root.TryGetProperty("queue_priority", out var qp)
+                && qp.ValueKind == JsonValueKind.Number
+                && qp.TryGetInt32(out var qpv))
+            {
+                queuePriority = qpv;
+            }
 
             var job = jobs.CreateJob(appId, capability, tier, kind, payload, jobId, queuePriority);
             return Results.Ok(new { job_id = job.JobId, status = job.Status, app_id = job.AppId, kind = job.Kind });
