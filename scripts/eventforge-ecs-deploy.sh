@@ -70,12 +70,17 @@ OLD_TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" \
   --desired-status RUNNING --region "$REGION" --query 'taskArns[0]' --output text 2>/dev/null || true)
 
 step "Update service (desiredCount=1, minHealthy=0, maxPercent=100)"
-aws ecs update-service \
-  --cluster "$CLUSTER" --service "$SERVICE" \
-  --task-definition "$NEW_ARN" --desired-count 1 \
-  --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}" \
-  --availability-zone-rebalancing DISABLED \
-  --force-new-deployment --region "$REGION" >/dev/null
+UPDATE_ARGS=(
+  --cluster "$CLUSTER" --service "$SERVICE"
+  --task-definition "$NEW_ARN" --desired-count 1
+  --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}"
+  --force-new-deployment --region "$REGION"
+)
+# Best-effort: older AWS CLI images may lack this flag.
+if aws ecs update-service help 2>/dev/null | grep -q availability-zone-rebalancing; then
+  UPDATE_ARGS+=(--availability-zone-rebalancing DISABLED)
+fi
+aws ecs update-service "${UPDATE_ARGS[@]}" >/dev/null
 
 step "Wait for single new task healthy (up to 5 min)"
 for i in $(seq 1 60); do
