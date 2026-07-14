@@ -361,6 +361,7 @@ public static class OpsEndpoints
                 leased_until = job.LeasedUntil?.ToString("O"),
                 completed_at = job.CompletedAt?.ToString("O"),
                 error = job.Error,
+                output_url = job.OutputUrl,
             });
         });
 
@@ -402,6 +403,32 @@ public static class OpsEndpoints
                 app_id = result.Value.Job.AppId,
                 status = result.Value.Job.Status,
                 cancelled = result.Value.Removed,
+            });
+        });
+
+        app.MapPost("/v1/ops/jobs/{jobId}/reemit-completion", async (
+            HttpContext ctx,
+            string jobId,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(jobId))
+                return Results.BadRequest(new { error = "job_id required" });
+
+            var job = await jobs.ReemitCompletionAsync(jobId.Trim(), ct);
+            if (job == null)
+                return Results.NotFound(new { job_id = jobId.Trim(), error = "not_completed_or_missing" });
+            return Results.Ok(new
+            {
+                job_id = job.JobId,
+                app_id = job.AppId,
+                status = job.Status.ToString().ToLowerInvariant(),
+                output_url = job.OutputUrl,
+                reemitted = true,
+                completed_at = job.CompletedAt?.ToString("O"),
             });
         });
 

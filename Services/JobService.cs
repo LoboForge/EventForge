@@ -714,20 +714,7 @@ public sealed class JobService
         _persist.MarkDirty();
         _fleet.OnComplete(workerId, job.WorkerHostname);
 
-        var manifest = BuildManifest(job);
-        var manifestJson = JsonSerializer.Serialize(manifest);
-        var eventType = ForgeEventTypes.Completed;
-        await _events.PersistAsync(job.AppId, job.JobId, eventType, manifestJson, job.CompletedAt.Value, null, ct);
-
-        await _ws.BroadcastAsync(job.AppId, new
-        {
-            type = ForgeEventTypes.Completed,
-            event_id = Guid.NewGuid().ToString(),
-            app_id = job.AppId,
-            job_id = job.JobId,
-            manifest,
-            completed_at = job.CompletedAt.Value.ToString("O"),
-        }, ForgeEventTypes.Completed, ct);
+        await PublishCompletedEventAsync(job, ct);
 
         if (job.Kind == JobKind.TextStream)
         {
@@ -746,6 +733,54 @@ public sealed class JobService
         _log.LogInformation("Job completed {Job} app={App} kind={Kind}", job.JobId, job.AppId, job.Kind);
         await PublishOpsJobEventAsync("ops.job.completed", job, ct);
         return job;
+    }
+
+    /// <summary>
+    /// Re-broadcast <c>forge.job.completed</c> for an already-completed job so consumers that
+    /// missed the original WS/HTTP event can apply the artifact (live-queue orphans).
+    /// </summary>
+    public async Task<JobRecord?> ReemitCompletionAsync(string jobId, CancellationToken ct)
+    {
+        var job = await _persist.TryGetJobAsync(jobId, ct)
+                  ?? _queue.Get(jobId)
+                  ?? _queue.SnapshotJobs()
+                      .FirstOrDefault(j => j.JobId.StartsWith(jobId.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (job == null) return null;
+        if (!string.Equals(job.Status, JobStatus.Completed, StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (string.IsNullOrWhiteSpace(job.OutputUrl) && job.Kind != JobKind.TextStream
+            && string.IsNullOrWhiteSpace(job.TextReply))
+        {
+            _log.LogWarning("Reemit skipped for {Job}: completed but no output_url/text", job.JobId);
+            return null;
+        }
+
+        // Fresh completed_at so HTTP poll `since` windows include this reemit.
+        job.CompletedAt = DateTimeOffset.UtcNow;
+        _queue.TryUpdate(job);
+        _persist.MarkDirty();
+
+        await PublishCompletedEventAsync(job, ct);
+        await PublishOpsJobEventAsync("ops.job.completed", job, ct);
+        _log.LogInformation("Re-emitted completion for {Job} app={App}", job.JobId, job.AppId);
+        return job;
+    }
+
+    private async Task PublishCompletedEventAsync(JobRecord job, CancellationToken ct)
+    {
+        var at = job.CompletedAt ?? DateTimeOffset.UtcNow;
+        var manifest = BuildManifest(job);
+        var manifestJson = JsonSerializer.Serialize(manifest);
+        await _events.PersistAsync(job.AppId, job.JobId, ForgeEventTypes.Completed, manifestJson, at, null, ct);
+        await _ws.BroadcastAsync(job.AppId, new
+        {
+            type = ForgeEventTypes.Completed,
+            event_id = Guid.NewGuid().ToString(),
+            app_id = job.AppId,
+            job_id = job.JobId,
+            manifest,
+            completed_at = at.ToString("O"),
+        }, ForgeEventTypes.Completed, ct);
     }
 
     public async Task<JobRecord?> FailAsync(string jobId, string workerId, string error, CancellationToken ct)
