@@ -75,6 +75,7 @@ aws ecs describe-services --cluster loboforge --services eventforge --region us-
 | `scripts/setup-eventforge-tunnel.sh` | Cloudflare tunnel + sidecar |
 | `scripts/bootstrap-eventforge-ecs.sh` | ECS task/service (desiredCount=1) |
 | `scripts/setup-eventforge-cloudmap.sh` | In-VPC DNS (optional) |
+| `scripts/grant-eventforge-forge-queue-s3-delete.sh` | Task role `s3:ListBucket` + `s3:DeleteObject` on forge-queue artifacts (ops purge `delete_s3:true`) |
 | `scripts/eventforge-ecs-deploy.sh` | Register task def + roll service |
 | `scripts/eventforge-deploy-health-gate.sh` | Post-deploy smoke checks |
 

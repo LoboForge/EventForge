@@ -165,8 +165,31 @@ public sealed class ArtifactStore : IArtifactStore, IDisposable
 
     public async Task DeleteJobArtifactsBatchAsync(IReadOnlyList<string> jobIds, CancellationToken ct)
     {
-        foreach (var jobId in jobIds)
-            await DeleteJobArtifactsAsync(jobId, ct);
+        // Parallelize list+delete so large ops purges finish within HTTP timeouts.
+        var errors = new System.Collections.Concurrent.ConcurrentBag<(string JobId, Exception Ex)>();
+        await Parallel.ForEachAsync(
+            jobIds,
+            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+            async (jobId, token) =>
+            {
+                try
+                {
+                    await DeleteJobArtifactsAsync(jobId, token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    errors.Add((jobId, ex));
+                }
+            });
+
+        if (!errors.IsEmpty)
+        {
+            var snapshot = errors.ToArray();
+            var first = snapshot[0];
+            throw new AggregateException(
+                $"Failed to delete S3 artifacts for {snapshot.Length}/{jobIds.Count} job(s); first={first.JobId}: {first.Ex.Message}",
+                snapshot.Select(e => e.Ex));
+        }
     }
 
     public async Task DeleteJobArtifactsAsync(string jobId, CancellationToken ct)
@@ -177,26 +200,44 @@ public sealed class ArtifactStore : IArtifactStore, IDisposable
         {
             var prefix = $"{_opts.Artifacts.Prefix.TrimEnd('/')}/{id}/";
             var bucket = _opts.Artifacts.Bucket.Trim();
-            string? token = null;
-            do
+            try
             {
-                var list = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+                string? token = null;
+                do
                 {
-                    BucketName = bucket,
-                    Prefix = prefix,
-                    ContinuationToken = token,
-                }, ct);
-                var keys = list.S3Objects.Select(o => new KeyVersion { Key = o.Key }).ToList();
-                if (keys.Count > 0)
-                {
-                    await _s3.DeleteObjectsAsync(new DeleteObjectsRequest
+                    var list = await _s3.ListObjectsV2Async(new ListObjectsV2Request
                     {
                         BucketName = bucket,
-                        Objects = keys,
+                        Prefix = prefix,
+                        ContinuationToken = token,
                     }, ct);
-                }
-                token = list.IsTruncated ? list.NextContinuationToken : null;
-            } while (token != null);
+                    var keys = list.S3Objects.Select(o => new KeyVersion { Key = o.Key }).ToList();
+                    if (keys.Count > 0)
+                    {
+                        var del = await _s3.DeleteObjectsAsync(new DeleteObjectsRequest
+                        {
+                            BucketName = bucket,
+                            Objects = keys,
+                            Quiet = false,
+                        }, ct);
+                        if (del.DeleteErrors is { Count: > 0 } errs)
+                        {
+                            var sample = errs[0];
+                            throw new AmazonS3Exception(
+                                $"DeleteObjects failed for s3://{bucket}/{sample.Key}: {sample.Code} {sample.Message}");
+                        }
+                    }
+                    token = list.IsTruncated ? list.NextContinuationToken : null;
+                } while (token != null);
+            }
+            catch (AmazonS3Exception ex)
+            {
+                _log.LogError(
+                    ex,
+                    "S3 artifact delete failed for job {JobId} bucket={Bucket} prefix={Prefix} status={Status} error={ErrorCode}",
+                    id, bucket, prefix, ex.StatusCode, ex.ErrorCode);
+                throw;
+            }
             return;
         }
 

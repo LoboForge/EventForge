@@ -250,6 +250,9 @@ public sealed class JobService
     {
         var app = appId.Trim();
         var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
+        // Remove from the in-memory queue first so workers cannot claim mid-purge.
+        // Persist deletions even when S3 cleanup fails — otherwise a later restore
+        // resurrects jobs that already disappeared from memory.
         var removed = _queue.RemoveWhere(j =>
         {
             if (!string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase)) return false;
@@ -258,11 +261,24 @@ public sealed class JobService
             return includeInFlight && j.Status is JobStatus.Leased or JobStatus.Streaming;
         });
         var ids = removed.Select(j => j.JobId).ToList();
+        Exception? s3Error = null;
         if (deleteS3 && ids.Count > 0)
-            await _artifacts.DeleteJobArtifactsBatchAsync(ids, ct);
+        {
+            try
+            {
+                await _artifacts.DeleteJobArtifactsBatchAsync(ids, ct);
+            }
+            catch (Exception ex)
+            {
+                s3Error = ex;
+                _log.LogError(ex, "S3 artifact delete failed while purging {Count} job(s) for app {AppId}", ids.Count, app);
+            }
+        }
         if (ids.Count > 0)
             await _persist.DeleteJobsAsync(ids, ct);
         _persist.MarkDirty();
+        if (s3Error != null)
+            throw s3Error;
         return (removed.Count, ids);
     }
 

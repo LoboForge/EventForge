@@ -85,22 +85,48 @@ public static class OpsEndpoints
             if (string.IsNullOrWhiteSpace(body.AppId))
                 return Results.BadRequest(new { error = "app_id required" });
 
-            var (removed, ids) = await jobs.PurgeQueuedForAppAsync(
-                body.AppId,
-                body.Capability,
-                body.IncludeInFlight,
-                body.DeleteS3,
-                ct);
-
-            return Results.Ok(new
+            try
             {
-                app_id = body.AppId.Trim(),
-                capability = body.Capability,
-                removed,
-                delete_s3 = body.DeleteS3,
-                include_in_flight = body.IncludeInFlight,
-                job_ids_sample = ids.Take(20).ToList(),
-            });
+                var (removed, ids) = await jobs.PurgeQueuedForAppAsync(
+                    body.AppId,
+                    body.Capability,
+                    body.IncludeInFlight,
+                    body.DeleteS3,
+                    ct);
+
+                return Results.Ok(new
+                {
+                    app_id = body.AppId.Trim(),
+                    capability = body.Capability,
+                    removed,
+                    delete_s3 = body.DeleteS3,
+                    include_in_flight = body.IncludeInFlight,
+                    job_ids_sample = ids.Take(20).ToList(),
+                });
+            }
+            catch (Amazon.S3.AmazonS3Exception ex)
+            {
+                return Results.Json(new
+                {
+                    error = "s3_delete_failed",
+                    message = ex.Message,
+                    s3_error_code = ex.ErrorCode,
+                    s3_status = (int?)ex.StatusCode,
+                    hint = "ECS task role needs s3:ListBucket + s3:DeleteObject on the forge-queue artifacts prefix (see scripts/grant-eventforge-forge-queue-s3-delete.sh).",
+                }, statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (AggregateException ex) when (ex.InnerExceptions.OfType<Amazon.S3.AmazonS3Exception>().Any())
+            {
+                var s3 = ex.InnerExceptions.OfType<Amazon.S3.AmazonS3Exception>().First();
+                return Results.Json(new
+                {
+                    error = "s3_delete_failed",
+                    message = ex.Message,
+                    s3_error_code = s3.ErrorCode,
+                    s3_status = (int?)s3.StatusCode,
+                    hint = "ECS task role needs s3:ListBucket + s3:DeleteObject on the forge-queue artifacts prefix (see scripts/grant-eventforge-forge-queue-s3-delete.sh).",
+                }, statusCode: StatusCodes.Status502BadGateway);
+            }
         });
 
         app.MapPost("/v1/ops/jobs/reassign-consumer", (
