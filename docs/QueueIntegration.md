@@ -625,6 +625,34 @@ Related docs: [forge-event-bus.md](./forge-event-bus.md) (design background), [g
 7. Never ship worker keys to end users.
 ---
 
+---
+
+## Customer LoRA library (app assets)
+
+Consumers can upload reusable LoRAs to EventForge. Files are stored in S3 (or local disk in dev) under `event-forge/loras/{appId}/…`. Workers download them on demand when a job graph references the basename.
+
+### Upload (app API key)
+
+1. `POST /v1/assets/loras` with JSON:
+   ```json
+   { "file_name": "my_style.safetensors", "modes": "image", "bytes": 123456789, "replace": false }
+   ```
+   Response includes `asset_id` and `upload.url` (presigned S3 PUT when configured, otherwise `PUT /v1/assets/loras/{id}/content`).
+2. `PUT` the raw `.safetensors` bytes to `upload.url` (include `Content-Type` from `upload.headers`).
+3. `POST /v1/assets/loras/{asset_id}/complete` to mark the asset `ready`.
+
+Other app routes: `GET /v1/assets/loras`, `GET /v1/assets/loras/{id}`, `DELETE /v1/assets/loras/{id}`.
+
+Only `.safetensors` basenames are accepted. Assets are scoped to the API key’s `app_id`.
+
+### Worker download
+
+`GET /v1/jobs/{jobId}/loras/{fileName}` (worker key) streams a ready LoRA for that job’s app. The EventForge agent pulls missing LoRAs from this endpoint before falling back to LoboForge `active-loras` / `request-work`.
+
+Job graphs still reference LoRAs by basename in `LoraLoader` nodes (`inputs.lora_name`). Claim gating treats EventForge-ready assets as satisfiable even when the worker has not downloaded them yet.
+
+---
+
 ## LoboForge vs EventForge (GPU mandate)
 
 | Role | Service | Responsibility |
@@ -640,4 +668,4 @@ LoboForge must **not** register GPU workers locally. Deprecated on LoboForge (41
 
 Model availability (`GET /api/generate/capabilities`, e.g. `lensAvailable`) reads `GET /v1/fleet/workers` on EventForge when configured.
 
-Workers still call LoboForge for **LoRA prefetch** (`POST /api/agent/request-work`) and bootstrap env (`GET /api/agent/gen-queue-mode`).
+Workers prefer EventForge LoRA downloads (`GET /v1/jobs/{jobId}/loras/{file}`) and may still call LoboForge for legacy **LoRA prefetch** (`POST /api/agent/request-work`) and bootstrap env (`GET /api/agent/gen-queue-mode`).

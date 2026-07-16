@@ -131,15 +131,31 @@ def resolve_lora_sync_mode(hostname: str | None = None) -> str:
     return "all"
 
 
+def _is_native_ltx_box(hostname: str | None = None) -> bool:
+    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
+    executor = os.environ.get("LOBO_EXECUTOR", "").strip().lower()
+    hn = (hostname or os.environ.get("LOBO_HOSTNAME") or os.environ.get("HN") or "").lower()
+    if mode == "wan-native" or "wan-native" in hn or hn.startswith("loboforge-wan-"):
+        return False
+    return (
+        mode == "ltx-native"
+        or "-ltx-" in hn
+        or hn.startswith("loboforge-ltx")
+        or (executor == "native" and _ltx23_enabled())
+    )
+
+
 def _is_native_wan_box(hostname: str | None = None) -> bool:
     mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
     executor = os.environ.get("LOBO_EXECUTOR", "").strip().lower()
     hn = (hostname or os.environ.get("LOBO_HOSTNAME") or os.environ.get("HN") or "").lower()
+    if _is_native_ltx_box(hostname):
+        return False
     return (
         mode == "wan-native"
-        or executor == "native"
         or "wan-native" in hn
         or hn.startswith("loboforge-wan-")
+        or (executor == "native" and mode in ("wan-native", "wan", ""))
     )
 
 
@@ -149,12 +165,30 @@ def _native_wan_layout_ready() -> bool:
         return True
     wan_root = (os.environ.get("WAN_MODEL_ROOT") or "/workspace/wan-models").strip()
     try:
-        from loboforge_worker.inference.wan.paths import i2v_ready, load_layout, wan_model_root
+        from loboforge_worker.inference.wan.paths import i2v_ready, load_layout, missing_artifacts, wan_model_root
 
         root = Path(wan_root) if wan_root else wan_model_root()
-        return load_layout(root) is not None and i2v_ready(root)
+        return (
+            load_layout(root) is not None
+            and i2v_ready(root)
+            and not missing_artifacts(root)
+        )
     except ImportError:
         return Path(wan_root, "layout.json").is_file()
+
+
+def _native_ltx_layout_ready() -> bool:
+    """Native LTX boxes claim only when layout.json + distilled stack + HF Gemma are on disk."""
+    if not _is_native_ltx_box():
+        return True
+    ltx_root = (os.environ.get("LTX_MODEL_ROOT") or "/workspace/ltx-models").strip()
+    try:
+        from loboforge_worker.inference.ltx.paths import load_layout, missing_artifacts, ltx_model_root
+
+        root = Path(ltx_root) if ltx_root else ltx_model_root()
+        return load_layout(root) is not None and not missing_artifacts(root)
+    except ImportError:
+        return Path(ltx_root, "layout.json").is_file()
 
 
 def _find_comfy_models_root() -> Path | None:
@@ -294,6 +328,92 @@ def sync_hub_active_loras(args: argparse.Namespace, mode: str | None = None) -> 
     result = {"mode": sync_mode, "pulled": pulled, "skipped": skipped, "failed": failed, "source": "active-loras"}
     log.info("LoRA sync (inline) mode=%s pulled=%s skipped=%s failed=%s", sync_mode, pulled, skipped, failed)
     return result
+
+
+
+def download_eventforge_job_lora(
+    args: argparse.Namespace,
+    job_id: str,
+    file_name: str,
+    *,
+    ef_base: str | None = None,
+    worker_key: str | None = None,
+) -> Path | None:
+    """
+    Download a ready app LoRA from EventForge for a job into the local models/loras tree.
+    Returns dest path on success, None if not found / unavailable.
+    """
+    base = (ef_base or os.environ.get("EVENT_FORGE_URL") or "").strip().rstrip("/")
+    key = (worker_key or os.environ.get("EVENT_FORGE_WORKER_KEY") or "").strip()
+    if not base or not key or not job_id or not file_name:
+        return None
+
+    root = _find_comfy_models_root()
+    if root is None:
+        log.warning("EventForge LoRA download skipped — Comfy models root not found")
+        return None
+
+    safe = _normalize_lora_basename(file_name)
+    if not safe:
+        return None
+    dest = root / "loras" / safe
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    min_bytes = 1_000_000
+    if dest.is_file() and dest.stat().st_size >= min_bytes:
+        return dest
+
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = f"{base}/v1/jobs/{job_id}/loras/{urllib.parse.quote(safe)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "LoboForge-Worker/1.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as ex:
+        if ex.code == 404:
+            return None
+        log.warning("EventForge LoRA download HTTP %s for %s: %s", ex.code, safe, ex)
+        return None
+    except Exception as ex:
+        log.warning("EventForge LoRA download failed for %s: %s", safe, ex)
+        return None
+
+    if len(data) < min_bytes:
+        log.warning("EventForge LoRA %s too small (%d bytes)", safe, len(data))
+        return None
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, len(data), job_id[:8])
+    return dest
+
+
+def pull_missing_loras_from_eventforge(
+    args: argparse.Namespace,
+    job_id: str,
+    missing: list[str],
+    *,
+    ef_base: str | None = None,
+    worker_key: str | None = None,
+) -> list[str]:
+    """Try to download each missing LoRA from EventForge. Returns basenames successfully pulled."""
+    pulled: list[str] = []
+    for name in missing:
+        path = download_eventforge_job_lora(
+            args, job_id, name, ef_base=ef_base, worker_key=worker_key,
+        )
+        if path is not None:
+            pulled.append(_normalize_lora_basename(name))
+    return pulled
+
 
 def _normalize_lora_basename(raw: str) -> str:
     if not raw:
@@ -503,20 +623,35 @@ def _has_lens_text_encoder(assets: list[str]) -> bool:
     return False
 
 
-def _has_wan_i2v(models: dict) -> bool:
-    for m in models.get("unets") or []:
+def _wan_noise_pair_present(names: list[str], *, kind: str) -> bool:
+    """True only when both high-noise and low-noise UNETs for kind (i2v/t2v) are listed.
+
+    Comfy Wan 2.2 MoE workflows require both stages; claiming on high-only causes
+    prompt validation 400 (low_noise unet_name not in list).
+    """
+    matched: list[str] = []
+    for m in names:
+        if not isinstance(m, str):
+            continue
         ml = m.lower()
-        if "wan" in ml and "i2v" in ml:
-            return True
-    return False
+        if kind == "i2v":
+            if "wan" in ml and "i2v" in ml:
+                matched.append(ml)
+        elif ("wan" in ml and "t2v" in ml) or "t2v_low_noise" in ml or "wan2.2_t2v" in ml:
+            matched.append(ml)
+    if not matched:
+        return False
+    has_high = any("high_noise" in u or "high-noise" in u for u in matched)
+    has_low = any("low_noise" in u or "low-noise" in u for u in matched)
+    return has_high and has_low
+
+
+def _has_wan_i2v(models: dict) -> bool:
+    return _wan_noise_pair_present(list(models.get("unets") or []), kind="i2v")
 
 
 def _has_wan_t2v(models: dict) -> bool:
-    for m in models.get("unets") or []:
-        ml = m.lower()
-        if ("wan" in ml and "t2v" in ml) or "t2v_low_noise" in ml or "wan2.2_t2v" in ml:
-            return True
-    return False
+    return _wan_noise_pair_present(list(models.get("unets") or []), kind="t2v")
 
 
 def _has_ace_step(assets: list[str]) -> bool:
@@ -552,13 +687,23 @@ def worker_can_run_model(
 
     models = state.get("models") or {}
     assets = _model_assets(state)
-    if not assets:
-        return False
-
     lower = model.strip().lower()
     hn = hostname or ""
     image_only = _hostname_is_image_only(hn)
     video_only = _hostname_is_wan_or_video_only(hn)
+
+    # Native Wan/LTX use disk layout, not Comfy inventory — do not require assets first.
+    if lower in ("wan2", "wan2flf") and _is_native_wan_box(hostname):
+        return (not image_only) and _native_wan_layout_ready()
+    if (
+        lower.startswith("ltx")
+        and lower not in ("music", "ace-step")
+        and _is_native_ltx_box(hostname)
+    ):
+        return (not image_only) and _native_ltx_layout_ready()
+
+    if not assets:
+        return False
 
     if lower == "wan2t2v":
         if image_only:
@@ -659,8 +804,11 @@ def worker_can_poll_capability(
             return _native_wan_layout_ready()
         if not _native_wan_layout_ready():
             return False
-    if cap == "ltx" and _music_enabled() and not _ltx23_enabled():
-        return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
+    if cap == "ltx":
+        if _is_native_ltx_box(hostname):
+            return _native_ltx_layout_ready()
+        if _music_enabled() and not _ltx23_enabled():
+            return worker_can_run_model(state, "music", hostname=hostname, capability=cap)
     probe = _CAPABILITY_PROBE_MODEL.get(cap)
     if not probe:
         return True

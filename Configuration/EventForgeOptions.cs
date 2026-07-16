@@ -29,6 +29,7 @@ public sealed class EventForgeOptions
     public VastAiOptions VastAi { get; set; } = new();
     public S3StoreOptions S3 { get; set; } = new();
     public ArtifactS3Options Artifacts { get; set; } = new();
+    public LoraAssetOptions LoraAssets { get; set; } = new();
 }
 
 public sealed class S3StoreOptions
@@ -47,6 +48,22 @@ public sealed class ArtifactS3Options
     public string Bucket { get; set; } = "";
     public string Prefix { get; set; } = "event-forge/jobs";
     public string Region { get; set; } = "us-east-2";
+}
+
+/// <summary>App-scoped LoRA library (S3 or local). When Bucket is empty, inherits Artifacts bucket.</summary>
+public sealed class LoraAssetOptions
+{
+    /// <summary>When true (and a bucket is available), use S3 + presigned PUT. Otherwise local disk + proxy upload.</summary>
+    public bool Enabled { get; set; }
+    public string Bucket { get; set; } = "";
+    public string Prefix { get; set; } = "event-forge/loras";
+    public string Region { get; set; } = "us-east-2";
+    public string LocalDir { get; set; } = "";
+    /// <summary>Max upload size in bytes (default 5 GiB).</summary>
+    public long MaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
+    public int PresignTtlMinutes { get; set; } = 60;
+    /// <summary>Minimum object size to mark ready (default 1 MiB).</summary>
+    public long MinReadyBytes { get; set; } = 1_000_000;
 }
 
 public sealed class VastAiOptions

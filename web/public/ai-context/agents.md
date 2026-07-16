@@ -6,8 +6,8 @@ Read this before changing EventForge code, ops workflows, or GPU fleet boxes. Yo
 
 **Public site:** https://eventforge.loboforge.com/  
 **Ops console:** https://eventforge.loboforge.com/ops (requires ops key; `noindex`)  
-**Integrator API docs:** `docs/QueueIntegration.md`  
-**Worker provisioning (Vast rent/patch):** `docs/worker-provisioning.md`  
+**Integrator API docs:** `docs/QueueIntegration.md` 
+**Worker provisioning (Vast rent/patch):** `docs/worker-provisioning.md` 
 **Deploy:** `docs/deploy-to-prod.md`
 
 ---
@@ -67,6 +67,7 @@ Ops (ops key)  → GET /v1/ops/*, WSS /v1/ops/ws, Vast rent/terminate
 - **Queue:** in-memory per ECS task — production runs **exactly one** EventForge task (`desiredCount=1`).
 - **Events:** worker `POST /complete` (or `/fail`) → EventForge persists (SQLite + optional S3 backup) → WebSocket fanout to app subscribers. **No SQS** in the active path.
 - **Workers:** Python agents on Vast boxes; bootstrap scripts fetched from EventForge first, LoboForge `/agent/*` as fallback.
+- **Customer LoRAs:** apps upload via `POST /v1/assets/loras` (S3/local library); workers download with `GET /v1/jobs/{id}/loras/{file}` (LoboForge active-loras remains fallback).
 
 **Legacy (remove, do not use):** `SqsIngressConsumer`, `IngressQueueUrl`, `forge-queue/` CDK, and `GenSqsJobQueue` SQS fallback paths are stale cutover code. Prod uses `Fleet:GenQueue:Mode=eventforge` only.
 

@@ -39,6 +39,7 @@ from loboforge_agent_common import (
     resolve_claim_ready_capabilities,
     resolve_lora_sync_mode,
     sync_hub_active_loras,
+    pull_missing_loras_from_eventforge,
     worker_can_run_assign,
     worker_has_lora,
 )
@@ -124,8 +125,11 @@ async def send_file_ef(
     data: bytes,
     mime_type: str,
 ) -> bool:
+    # Always store as output.<ext> so fleet clients can resolve without listing S3.
+    # (ComfyUI_NNNNN_.mp4 names previously broke ResolveOutputMedia which only
+    # looked for output.mp4 / fixed names.)
     ext = Path(filename).suffix or ".bin"
-    out_name = f"output{ext}" if not filename else filename
+    out_name = f"output{ext.lower()}" if ext else "output.bin"
     url = f"{session._ef}/v1/jobs/{job_uuid}/output?file={out_name}"
     headers = {
         "Authorization": f"Bearer {session._key}",
@@ -332,6 +336,27 @@ async def process_ef_job(
     loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
     if not loras_ok:
         try:
+            pulled_ef = await asyncio.to_thread(
+                pull_missing_loras_from_eventforge,
+                args,
+                job_id,
+                missing_loras,
+                ef_base=ef_base,
+                worker_key=worker_key,
+            )
+            if pulled_ef:
+                log.info(
+                    "Pre-job EventForge LoRA pull for %s: %s",
+                    job_id[:8],
+                    ", ".join(pulled_ef),
+                )
+                await _sync_lora_inventory(state, args)
+                loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
+        except Exception as ex:
+            log.warning("Pre-job EventForge LoRA pull failed: %s", ex)
+
+    if not loras_ok:
+        try:
             sync_result = await asyncio.to_thread(sync_hub_active_loras, args)
             log.info(
                 "Pre-job LoRA sync mode=%s pulled=%s for missing: %s",
@@ -373,11 +398,33 @@ async def process_ef_job(
 
     if session.failed_reason:
         reason = session.failed_reason
+        rl = reason.lower()
         if reason.startswith("Text encoder not on worker"):
             log.info("Releasing job %s — %s", job_id[:8], reason)
             await ef_release(http, ef_base, worker_key, job_id)
-        elif "not provisioned" in reason.lower() or "layout.json missing" in reason.lower():
+        elif "not provisioned" in rl or "layout.json missing" in rl:
             log.warning("Releasing job %s — worker not ready: %s", job_id[:8], reason)
+            await ef_release(http, ef_base, worker_key, job_id)
+        elif (
+            "prompt_outputs_failed_validation" in rl
+            or "value_not_in_list" in rl
+            or ("unet_name" in rl and "not in" in rl)
+        ):
+            # Incomplete Wan download / stale claim_ready: do not terminal-fail bulk backlog.
+            log.warning(
+                "Releasing job %s — Comfy model validation (refreshing claim_ready): %s",
+                job_id[:8],
+                reason[:240],
+            )
+            try:
+                models = await agent.get_available_models(args.comfyui_http)
+                state["models"] = models
+            except Exception as ex:
+                log.warning("Model refresh after validation failure failed: %s", ex)
+            caps = state.get("forge_queue_capabilities") or []
+            state["claim_ready_capabilities"] = resolve_claim_ready_capabilities(
+                state, caps, hostname=args.hostname,
+            )
             await ef_release(http, ef_base, worker_key, job_id)
         else:
             await ef_fail(http, ef_base, worker_key, job_id, reason)

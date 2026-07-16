@@ -47,6 +47,9 @@ public static class EventForgeApplication
         builder.Services.AddSingleton<IEventStore, SqliteEventStore>();
         builder.Services.AddSingleton<ISqliteS3Persistence, SqliteS3Persistence>();
         builder.Services.AddSingleton<IArtifactStore, ArtifactStore>();
+        builder.Services.AddSingleton<ILoraAssetBlobStore, LoraAssetBlobStore>();
+        builder.Services.AddSingleton<LoraAssetCatalog>();
+        builder.Services.AddSingleton<LoraAssetService>();
         builder.Services.AddSingleton<WorkerFleetTracker>();
         builder.Services.AddSingleton<OpsEventHub>();
         builder.Services.AddSingleton<ConsumerAppRegistry>();
@@ -84,6 +87,7 @@ public static class EventForgeApplication
         app.MapAgentEndpoints();
         app.MapJobEndpoints();
         app.MapConsumerEndpoints();
+        app.MapAssetEndpoints();
         app.MapFleetEndpoints();
         app.MapWorkerEndpoints();
         app.MapOpsEndpoints();

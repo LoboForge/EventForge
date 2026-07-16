@@ -23,6 +23,7 @@ public sealed class JobService
     private readonly WorkerFleetTracker _fleet;
     private readonly OpsEventHub _ops;
     private readonly ConsumerAppRegistry _apps;
+    private readonly LoraAssetService _loras;
     private readonly ILogger<JobService> _log;
     private readonly Dictionary<string, StringBuilder> _streamBuffers = new(StringComparer.OrdinalIgnoreCase);
 
@@ -36,6 +37,7 @@ public sealed class JobService
         WorkerFleetTracker fleet,
         OpsEventHub ops,
         ConsumerAppRegistry apps,
+        LoraAssetService loras,
         ILogger<JobService> log)
     {
         _opts = options.Value;
@@ -47,6 +49,7 @@ public sealed class JobService
         _fleet = fleet;
         _ops = ops;
         _apps = apps;
+        _loras = loras;
         _log = log;
     }
 
@@ -142,7 +145,16 @@ public sealed class JobService
         {
             var required = WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson);
             if (required.Count == 0) return true;
-            return WorkerLoraCompatibility.HasAllRequiredLoras(knownLoras, assets, required);
+            // Allow claim when each required LoRA is on the worker OR registered ready for this app.
+            foreach (var req in required)
+            {
+                if (WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req))
+                    continue;
+                if (_loras.AppHasReadyLora(job.AppId, req))
+                    continue;
+                return false;
+            }
+            return true;
         };
     }
 
