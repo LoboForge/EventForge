@@ -30,6 +30,10 @@ public sealed class LoraAssetService
 
     public Task InitializeAsync(CancellationToken ct) => _catalog.InitializeAsync(ct);
 
+    public long MaxUploadBytes => _opts.LoraAssets.MaxBytes > 0
+        ? _opts.LoraAssets.MaxBytes
+        : 5L * 1024 * 1024 * 1024;
+
     public async Task<(LoraAssetRecord Asset, string UploadMethod, string UploadUrl, IReadOnlyDictionary<string, string> UploadHeaders)?>
         BeginUploadAsync(
             string appId,
@@ -44,7 +48,7 @@ public sealed class LoraAssetService
         if (safeName == null)
             throw new ArgumentException("file_name must be a .safetensors basename");
 
-        var maxBytes = _opts.LoraAssets.MaxBytes > 0 ? _opts.LoraAssets.MaxBytes : 5L * 1024 * 1024 * 1024;
+        var maxBytes = MaxUploadBytes;
         if (expectedBytes is > 0 && expectedBytes > maxBytes)
             throw new ArgumentException($"file exceeds MaxBytes ({maxBytes})");
 
@@ -105,7 +109,7 @@ public sealed class LoraAssetService
             && !string.Equals(record.Status, LoraAssetStatus.Failed, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("asset_not_pending");
 
-        var maxBytes = _opts.LoraAssets.MaxBytes > 0 ? _opts.LoraAssets.MaxBytes : 5L * 1024 * 1024 * 1024;
+        var maxBytes = MaxUploadBytes;
         await using var limited = new MaxLengthReadStream(body, maxBytes);
         await _blobs.PutAsync(record.ObjectKey, contentType ?? record.ContentType, limited, ct);
         record.Bytes = limited.BytesRead;
@@ -130,7 +134,7 @@ public sealed class LoraAssetService
             throw new InvalidOperationException("object_missing_or_too_small");
         }
 
-        var maxBytes = _opts.LoraAssets.MaxBytes > 0 ? _opts.LoraAssets.MaxBytes : 5L * 1024 * 1024 * 1024;
+        var maxBytes = MaxUploadBytes;
         if (size > maxBytes)
         {
             record.Status = LoraAssetStatus.Failed;

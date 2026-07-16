@@ -2,6 +2,7 @@ using System.Text.Json;
 using EventForge.Auth;
 using EventForge.Models;
 using EventForge.Services;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace EventForge.Api;
 
@@ -68,6 +69,16 @@ public static class AssetEndpoints
         {
             if (!AuthHelpers.TryReadApiKey(ctx, out var token) || !auth.TryValidate(token, out var appId))
                 return Results.Unauthorized();
+
+            // This endpoint consumes Request.Body directly; do not parse forms or buffer the upload.
+            // Raise Kestrel's per-request cap before the body is read so local/proxy uploads can use
+            // the same configured limit as direct S3 uploads.
+            var sizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
+            if (sizeFeature is { IsReadOnly: false })
+                sizeFeature.MaxRequestBodySize = loras.MaxUploadBytes;
+
+            if (ctx.Request.ContentLength > loras.MaxUploadBytes)
+                return Results.BadRequest(new { error = "file_too_large" });
 
             try
             {

@@ -1,6 +1,7 @@
 using Amazon;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.S3.Transfer;
 using EventForge.Configuration;
 using Microsoft.Extensions.Options;
 
@@ -66,26 +67,30 @@ public sealed class LoraAssetBlobStore : ILoraAssetBlobStore, IDisposable
     {
         if (_s3 != null)
         {
-            var bytes = await ReadAllBytesAsync(body, ct);
-            await using var uploadStream = new MemoryStream(bytes, writable: false);
-            var request = new PutObjectRequest
+            // TransferUtility streams request bodies in multipart-sized chunks. Do not materialize
+            // a multi-gigabyte LoRA in memory when the proxy endpoint is used.
+            using var transfer = new TransferUtility(_s3);
+            var request = new TransferUtilityUploadRequest
             {
                 BucketName = Bucket,
                 Key = objectKey,
-                InputStream = uploadStream,
+                InputStream = body,
+                AutoCloseStream = false,
                 ContentType = string.IsNullOrWhiteSpace(contentType)
                     ? "application/octet-stream"
                     : contentType,
             };
-            request.Headers.ContentLength = bytes.LongLength;
-            await _s3.PutObjectAsync(request, ct);
+            await transfer.UploadAsync(request, ct);
             return;
         }
 
         var path = LocalPath(objectKey);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await using var fs = File.Create(path);
-        await body.CopyToAsync(fs, ct);
+        await using var fs = new FileStream(
+            path, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 1024 * 1024,
+            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await body.CopyToAsync(fs, 1024 * 1024, ct);
     }
 
     public async Task<(Stream Stream, string ContentType, long Length)?> TryOpenAsync(
@@ -180,23 +185,6 @@ public sealed class LoraAssetBlobStore : ILoraAssetBlobStore, IDisposable
             if (!string.IsNullOrWhiteSpace(v)) return v;
         }
         return "";
-    }
-
-    private static async Task<byte[]> ReadAllBytesAsync(Stream body, CancellationToken ct)
-    {
-        if (body is MemoryStream mem && mem.TryGetBuffer(out var segment))
-        {
-            if (mem.Position != 0 || mem.Length != segment.Count)
-            {
-                mem.Position = 0;
-                return mem.ToArray();
-            }
-            return segment.AsSpan().ToArray();
-        }
-
-        using var ms = new MemoryStream();
-        await body.CopyToAsync(ms, ct);
-        return ms.ToArray();
     }
 
     public void Dispose() => _s3?.Dispose();
