@@ -6,6 +6,7 @@ import {
   formatDiskGb,
   formatVram,
   isGenFleetWorker,
+  opsFetch,
   type WorkerRow,
   workerFleetRowKey,
 } from './api'
@@ -46,7 +47,12 @@ function ModelList({ title, items }: { title: string; items: string[] }) {
   )
 }
 
-function WorkerDetail({ w }: { w: WorkerRow }) {
+function WorkerDetail({ w, onQuarantine, onUnquarantine, busy }: {
+  w: WorkerRow
+  onQuarantine: (id: string) => void
+  onUnquarantine: (id: string) => void
+  busy: string | null
+}) {
   return (
     <div className="worker-detail">
       <div className="detail-grid">
@@ -58,6 +64,31 @@ function WorkerDetail({ w }: { w: WorkerRow }) {
             <dt>Fleet mode</dt><dd>{w.fleetMode || '—'}</dd>
             <dt>Transport</dt><dd>{w.transport}</dd>
             <dt>ComfyUI</dt><dd>{w.comfyOk ? 'OK' : <span className="error">down</span>}</dd>
+            <dt>Quarantine</dt>
+            <dd>
+              {w.quarantined ? (
+                <>
+                  <span className="badge contrib quarantined">quarantined</span>
+                  {w.quarantineReason && <span className="muted small"> {w.quarantineReason}</span>}
+                  {' '}
+                  <button
+                    className="btn secondary small"
+                    disabled={busy === `unq:${workerFleetRowKey(w)}`}
+                    onClick={() => onUnquarantine(w.hostname || w.nodeUuid || w.workerId)}
+                  >
+                    Unquarantine
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="btn warn small"
+                  disabled={busy === `q:${workerFleetRowKey(w)}`}
+                  onClick={() => onQuarantine(w.hostname || w.nodeUuid || w.workerId)}
+                >
+                  Quarantine box
+                </button>
+              )}
+            </dd>
           </dl>
         </div>
         <div className="detail-block">
@@ -99,10 +130,46 @@ function WorkerDetail({ w }: { w: WorkerRow }) {
   )
 }
 
-export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
+export function OpsFleetTab({ workers, onRefresh }: { workers: WorkerRow[]; onRefresh?: () => void }) {
   const [filter, setFilter] = useState<FleetFilter>('all')
   const [expanded, setExpanded] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function quarantineWorker(id: string) {
+    const reason = prompt('Quarantine reason (stops claims for this box only; consumers can still upload):', 'maintenance_worker')
+    if (reason === null) return
+    setBusy(`q:${id}`)
+    setErr(null)
+    try {
+      await opsFetch(`/v1/ops/workers/${encodeURIComponent(id)}/quarantine`, {
+        method: 'POST',
+        body: JSON.stringify({ reason, quarantinedBy: 'ops-ui' }),
+      })
+      setMsg(`Quarantined ${id}`)
+      onRefresh?.()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function unquarantineWorker(id: string) {
+    setBusy(`unq:${id}`)
+    setErr(null)
+    try {
+      await opsFetch(`/v1/ops/workers/${encodeURIComponent(id)}/unquarantine`, { method: 'POST' })
+      setMsg(`Unquarantined ${id}`)
+      onRefresh?.()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const visible = useMemo(() => {
     let rows = workers
@@ -229,7 +296,10 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
         <div>
           <h2>Connected workers</h2>
           <p className="muted card-sub">
+{msg && <div className="success">{msg}</div>}
+            {err && <div className="error">{err}</div>}
             {workers.length} total · {genCount} gen fleet · click a row for models, LoRAs, and job stats
+            <span className="muted"> · Quarantine a broken box here — do not pause the consumer app</span>
           </p>
         </div>
         <div className="row toolbar">
@@ -271,7 +341,7 @@ export function OpsFleetTab({ workers }: { workers: WorkerRow[] }) {
           if (expanded !== key) return null
           return (
             <tr className="fleet-detail-row">
-              <td colSpan={columns.length}><WorkerDetail w={w} /></td>
+              <td colSpan={columns.length}><WorkerDetail w={w} onQuarantine={(id) => void quarantineWorker(id)} onUnquarantine={(id) => void unquarantineWorker(id)} busy={busy} /></td>
             </tr>
           )
         }}

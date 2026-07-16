@@ -313,7 +313,7 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
   const [err, setErr] = useState<string | null>(null)
 
   async function pause(appId: string) {
-    const reason = prompt('Pause reason (e.g. generations_exhausted):', 'generations_exhausted')
+    const reason = prompt('Pause reason (billing only — blocks ALL uploads for this app). For a broken GPU box, quarantine the worker on the Fleet tab instead.\n\nReason:', 'generations_exhausted')
     if (reason === null) return
     setBusy(`pause:${appId}`)
     setErr(null)
@@ -367,7 +367,7 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
       <div className="card-head">
         <div>
           <h2>Consumer apps</h2>
-          <p className="muted card-sub">Pause enqueue when a customer is out of generations. Purge queued work per app.</p>
+          <p className="muted card-sub">Pause blocks all job enqueue (HTTP 402) for billing/quota holds — not for broken workers. Quarantine a box on the Fleet tab instead. Purge queued work per app.</p>
         </div>
       </div>
       <SortableTable
@@ -613,7 +613,7 @@ export default function OpsApp() {
         ))}
       </nav>
       {tab === 'overview' && <OverviewTab snapshot={snapshot} metrics={metrics} />}
-      {tab === 'fleet' && <OpsFleetTab workers={workers} />}
+      {tab === 'fleet' && <OpsFleetTab workers={workers} onRefresh={refresh} />}
       {tab === 'queue' && (
         <QueueTab
           snapshot={snapshot}

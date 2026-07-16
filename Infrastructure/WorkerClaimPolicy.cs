@@ -21,6 +21,8 @@ public static class WorkerClaimPolicy
     public static IReadOnlyList<string> EffectiveClaimReady(WorkerSnapshot? worker)
     {
         if (worker == null || !IsCheckInFresh(worker)) return [];
+        // Ops quarantine: box stays visible in fleet but cannot claim (incl. inventory-optional caps).
+        if (worker.Quarantined) return [];
 
         var explicitReady = worker.ClaimReadyCapabilities
             .Where(c => !string.IsNullOrWhiteSpace(c))

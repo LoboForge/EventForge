@@ -452,6 +452,50 @@ public static class OpsEndpoints
             return Results.Ok(new { worker, active_jobs = activeJobs });
         });
 
+        app.MapPost("/v1/ops/workers/{workerId}/quarantine", (
+            HttpContext ctx,
+            string workerId,
+            QuarantineWorkerBody? body,
+            WorkerFleetTracker fleet,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(workerId))
+                return Results.BadRequest(new { error = "worker_id required" });
+            var state = fleet.Quarantine(workerId, body?.Reason, body?.QuarantinedBy ?? "ops");
+            return state == null
+                ? Results.NotFound(new { error = "worker_not_found", worker_id = workerId })
+                : Results.Ok(new
+                {
+                    worker_id = state.WorkerId,
+                    hostname = state.Hostname,
+                    quarantined = state.Quarantined,
+                    quarantine_reason = state.QuarantineReason,
+                    quarantined_at = state.QuarantinedAtUtc?.ToString("O"),
+                    claim_ready_capabilities = state.ClaimReadyCapabilities,
+                });
+        });
+
+        app.MapPost("/v1/ops/workers/{workerId}/unquarantine", (
+            HttpContext ctx,
+            string workerId,
+            WorkerFleetTracker fleet,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            var state = fleet.Unquarantine(workerId);
+            return state == null
+                ? Results.NotFound(new { error = "worker_not_found", worker_id = workerId })
+                : Results.Ok(new
+                {
+                    worker_id = state.WorkerId,
+                    hostname = state.Hostname,
+                    quarantined = false,
+                });
+        });
+
         app.MapGet("/v1/ops/metrics/history", (
             HttpContext ctx,
             OpsMetricsHistory history,
@@ -508,7 +552,20 @@ public static class OpsEndpoints
                 return Results.Unauthorized();
             if (string.IsNullOrWhiteSpace(appId))
                 return Results.BadRequest(new { error = "app_id required" });
-            var state = apps.Pause(appId, body?.Reason ?? "generations_exhausted", body?.PausedBy ?? "ops");
+            var reason = body?.Reason ?? "generations_exhausted";
+            // Worker dependency / box maintenance must not block consumer uploads (402).
+            // Quarantine the broken worker instead: POST /v1/ops/workers/{id}/quarantine
+            if (IsWorkerMaintenancePauseReason(reason) && body?.Force != true)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "use_worker_quarantine",
+                    message = "Worker/dependency failures must quarantine the worker, not pause the consumer app. App pause returns 402 and stops all uploads for that app.",
+                    hint = "POST /v1/ops/workers/{hostname_or_node}/quarantine with { reason }. Pass force=true only for intentional billing/product holds.",
+                    reason,
+                });
+            }
+            var state = apps.Pause(appId, reason, body?.PausedBy ?? "ops");
             return Results.Ok(new
             {
                 app_id = state.AppId,
@@ -531,6 +588,16 @@ public static class OpsEndpoints
                 ? Results.NotFound()
                 : Results.Ok(new { app_id = state.AppId, paused = false, unpaused_at = state.UnpausedAtUtc?.ToString("O") });
         });
+    }
+
+
+    internal static bool IsWorkerMaintenancePauseReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) return false;
+        var r = reason.Trim();
+        return r.StartsWith("maintenance_", StringComparison.OrdinalIgnoreCase)
+               || r.Contains("missing_librosa", StringComparison.OrdinalIgnoreCase)
+               || r.Contains("missing_decord", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void RecordMetrics(OpsMetricsHistory history, WorkerFleetTracker fleet, InMemoryJobQueue queue)
@@ -630,6 +697,10 @@ public static class OpsEndpoints
             w.JobsReleased,
             w.LastSeenAt,
             w.CheckInStale,
+            w.Quarantined,
+            quarantine_reason = w.QuarantineReason,
+            quarantined_at = w.QuarantinedAtUtc?.ToString("O"),
+            quarantined_by = w.QuarantinedBy,
             contributing = badges.Count == 0,
             badges,
         };
@@ -723,6 +794,14 @@ public sealed class PauseAppBody
 {
     public string? Reason { get; set; }
     public string? PausedBy { get; set; }
+    /// <summary>Override maintenance_* guard; required to intentionally pause uploads for a maintenance reason.</summary>
+    public bool Force { get; set; }
+}
+
+public sealed class QuarantineWorkerBody
+{
+    public string? Reason { get; set; }
+    public string? QuarantinedBy { get; set; }
 }
 
 public sealed class CancelMatchingRequest

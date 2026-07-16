@@ -30,6 +30,8 @@ public sealed class WorkerFleetTracker
         stats.KnownLoras = payload.KnownLoras?.ToList() ?? [];
         stats.Capabilities = payload.ForgeQueueCapabilities?.ToList() ?? [];
         stats.ClaimReadyCapabilities = payload.ClaimReadyCapabilities?.ToList() ?? [];
+        if (stats.Quarantined)
+            stats.ClaimReadyCapabilities = [];
         stats.LastSeenUtc = DateTimeOffset.UtcNow;
         if (payload.Busy && !string.IsNullOrWhiteSpace(payload.CurrentJobUuid))
         {
@@ -106,6 +108,51 @@ public sealed class WorkerFleetTracker
         stats.CurrentJobUuid = null;
         stats.State = "idle";
         stats.Busy = false;
+    }
+
+    public WorkerSnapshot? Quarantine(string workerIdOrHostname, string? reason = null, string? quarantinedBy = null)
+    {
+        var stats = FindMutable(workerIdOrHostname);
+        if (stats == null) return null;
+        stats.Quarantined = true;
+        stats.QuarantineReason = string.IsNullOrWhiteSpace(reason) ? "ops_quarantine" : reason.Trim();
+        stats.QuarantinedAtUtc = DateTimeOffset.UtcNow;
+        stats.QuarantinedBy = quarantinedBy;
+        // Drop claim-ready immediately so this box cannot take new work until unquarantined.
+        stats.ClaimReadyCapabilities = [];
+        return ToSnapshot(stats);
+    }
+
+    public WorkerSnapshot? Unquarantine(string workerIdOrHostname)
+    {
+        var stats = FindMutable(workerIdOrHostname);
+        if (stats == null) return null;
+        stats.Quarantined = false;
+        stats.QuarantineReason = null;
+        stats.QuarantinedAtUtc = null;
+        stats.QuarantinedBy = null;
+        return ToSnapshot(stats);
+    }
+
+    public bool IsQuarantined(string? hostname)
+    {
+        if (string.IsNullOrWhiteSpace(hostname)) return false;
+        var stats = FindMutable(hostname);
+        return stats?.Quarantined == true;
+    }
+
+    private WorkerStats? FindMutable(string workerIdOrHostname)
+    {
+        if (string.IsNullOrWhiteSpace(workerIdOrHostname)) return null;
+        var key = workerIdOrHostname.Trim();
+        if (_workers.TryGetValue(key, out var byKey)) return byKey;
+        foreach (var stats in _workers.Values)
+        {
+            if (string.Equals(stats.WorkerKey, key, StringComparison.OrdinalIgnoreCase)) return stats;
+            if (string.Equals(stats.NodeUuid, key, StringComparison.OrdinalIgnoreCase)) return stats;
+            if (string.Equals(stats.Hostname, key, StringComparison.OrdinalIgnoreCase)) return stats;
+        }
+        return null;
     }
 
     public WorkerSnapshot? TryGetWorker(string workerKey)
@@ -198,6 +245,10 @@ public sealed class WorkerFleetTracker
             JobsReleased = w.JobsReleased,
             LastSeenAt = w.LastSeenUtc.ToString("O"),
             CheckInStale = w.LastSeenUtc < cutoff,
+            Quarantined = w.Quarantined,
+            QuarantineReason = w.QuarantineReason,
+            QuarantinedAtUtc = w.QuarantinedAtUtc,
+            QuarantinedBy = w.QuarantinedBy,
         };
     }
 
@@ -286,6 +337,10 @@ public sealed class WorkerFleetTracker
         public string? CurrentJobUuid { get; set; }
         public List<string> Capabilities { get; set; } = [];
         public List<string> ClaimReadyCapabilities { get; set; } = [];
+        public bool Quarantined { get; set; }
+        public string? QuarantineReason { get; set; }
+        public DateTimeOffset? QuarantinedAtUtc { get; set; }
+        public string? QuarantinedBy { get; set; }
         public List<string> KnownLoras { get; set; } = [];
         public string? ModelsJson { get; set; }
         public string State { get; set; } = "idle";
@@ -359,4 +414,8 @@ public sealed class WorkerSnapshot
     public int JobsReleased { get; init; }
     public string LastSeenAt { get; init; } = "";
     public bool CheckInStale { get; init; }
+    public bool Quarantined { get; init; }
+    public string? QuarantineReason { get; init; }
+    public DateTimeOffset? QuarantinedAtUtc { get; init; }
+    public string? QuarantinedBy { get; init; }
 }

@@ -205,6 +205,7 @@ curl -sS -X POST "$EVENT_FORGE_URL/v1/workers/check-in" \
 | Jobs enqueue but never complete | Workers on wrong queue / not claiming | Confirm `LOBO_GEN_QUEUE=eventforge`, agent is `loboforge_agent_eventforge.py` |
 | Joycaption-only in fleet | Other boxes not checking in | Patch gen + ltx + ollama; confirm Vast instances running |
 | Code pushed but UI unchanged | CodeBuild/ECS not deployed | Check CodeBuild + `eventforge` service task image tag |
+| Consumer uploads stopped / `app_paused` 402 after worker dep failure | App pause used for box maintenance (`maintenance_*`) | Unpause app; quarantine the worker (`POST /v1/ops/workers/{hostname}/quarantine`). Do **not** pause consumers for broken boxes. |
 
 ---
 

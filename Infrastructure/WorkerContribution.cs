@@ -14,6 +14,9 @@ public static class WorkerContribution
         var badges = new List<string>();
         var hn = (w.Hostname ?? "").ToLowerInvariant();
 
+        if (w.Quarantined)
+            badges.Add("quarantined");
+
         if (w.CheckInStale)
             badges.Add("stale");
 

@@ -83,6 +83,9 @@ export type WorkerRow = {
   jobsReleased: number
   contributing?: boolean
   badges: string[]
+  quarantined?: boolean
+  quarantineReason?: string | null
+  quarantinedAt?: string | null
 }
 
 export type Snapshot = {
@@ -244,16 +247,22 @@ export function normalizeWorker(raw: Record<string, unknown>): WorkerRow {
     jobsReleased: readNum(raw, 'jobsReleased', 'jobs_released'),
     contributing: typeof raw.contributing === 'boolean' ? raw.contributing : true,
     badges: readStrList(raw, 'badges'),
+    quarantined: readBool(raw, 'quarantined') || readBool(raw, 'Quarantined'),
+    quarantineReason: readStr(raw, 'quarantineReason', 'quarantine_reason') || null,
+    quarantinedAt: readStr(raw, 'quarantinedAt', 'quarantined_at') || null,
   }
 }
 
 const BADGE_LABELS: Record<string, string> = {
+  quarantined: 'Quarantined',
   stale: 'Stale',
   'queue-blocked': 'Queue blocked',
   'comfy-down': 'Comfy down',
+  'wan-not-ready': 'Wan not ready',
   'no-claim-ready': 'No claim-ready',
   'idle-no-jobs': 'Idle (no jobs)',
   'busy-no-job-id': 'Busy w/o job',
+  'disk-low': 'Disk low',
 }
 
 export function badgeLabel(badge: string): string {
