@@ -18,6 +18,7 @@ import {
 } from './api'
 import { OpsFleetTab } from './OpsFleetTab'
 import { OpsVastTab } from './OpsVastTab'
+import { UploadDock } from './UploadDock'
 
 type Tab = 'overview' | 'fleet' | 'queue' | 'apps' | 'failures' | 'vast'
 
@@ -626,6 +627,7 @@ export default function OpsApp() {
       {tab === 'apps' && <AppsTab apps={appRows} onRefresh={() => void refresh()} />}
       {tab === 'failures' && <FailuresTab snapshot={snapshot} />}
       {tab === 'vast' && <OpsVastTab />}
+      <UploadDock />
     </div>
   )
 }

@@ -645,6 +645,12 @@ Other app routes: `GET /v1/assets/loras`, `GET /v1/assets/loras/{id}`, `DELETE /
 
 Only `.safetensors` basenames are accepted. Assets are scoped to the API key’s `app_id`.
 
+### Resilient browser upload queue
+
+Consumer UIs (including Reet) should keep a client-side queue rather than treating a multi-file selection as one request. Store item metadata (`fileName`, `size`, `status`, `progress`, `error`) in `localStorage`, keep `File` handles in memory for the active browser session, and upload sequentially with `XMLHttpRequest.upload.onprogress` for direct S3 PUT progress. Do not discard failed entries: expose retry and clear-completed actions. After a page reload, retain the entries as “re-attach file” rows matched by name and size; browser storage cannot persist `File` handles safely.
+
+The EventForge ops console implements this reference pattern in its bottom **LoRA uploads** dock. It intentionally asks for an app API key (held in `sessionStorage`) because the asset endpoints are scoped to that app; the ops key alone cannot create or complete an app asset upload.
+
 ### Worker download
 
 `GET /v1/jobs/{jobId}/loras/{fileName}` (worker key) streams a ready LoRA for that job’s app. The EventForge agent pulls missing LoRAs from this endpoint before falling back to LoboForge `active-loras` / `request-work`.
