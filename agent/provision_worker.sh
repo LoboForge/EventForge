@@ -111,7 +111,7 @@ PY="/venv/main/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
 # Agent imports need these before bootstrap touches loboforge_agent.py.
-"$PY" -m pip install -q -U websockets aiohttp gdown huggingface_hub boto3 2>/dev/null || true
+"$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" boto3 2>/dev/null || true
 
 # Always refresh from prod — onstart only runs once; a failed first attempt must not
 # leave a stale loboforge_worker tree (regression: import-before-pip in old bundle).

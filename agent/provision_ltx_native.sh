@@ -97,7 +97,7 @@ with urllib.request.urlopen(req, timeout=120) as resp, open(os.environ["LOBO_FET
 PY
 }
 
-"$PY" -m pip install -q -U websockets aiohttp gdown huggingface_hub 2>/dev/null || true
+"$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" 2>/dev/null || true
 
 BASE="${LOBO_BASE_URL:-https://www.loboforge.com}"
 BASE="${BASE%/}"

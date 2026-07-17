@@ -23,7 +23,7 @@ fi
 # Never reinstall torch — use Comfy image CUDA build via --system-site-packages
 "$PY" -m pip install -q \
   "transformers>=5.9" "bitsandbytes>=0.45.0" accelerate \
-  pillow tqdm huggingface_hub
+  pillow tqdm "huggingface_hub>=0.36.2,<1.0"
 
 "$PY" -c "import torch; assert torch.cuda.is_available(), 'CUDA not available — wrong torch build'"
 cap=$("$PY" -c "import torch; print(torch.cuda.get_device_capability(0)[0] if torch.cuda.is_available() else 99)" 2>/dev/null || echo 99)

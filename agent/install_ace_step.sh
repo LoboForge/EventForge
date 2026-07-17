@@ -18,7 +18,7 @@ if [[ -f "$ACE_DEST" ]] && [[ "$(stat -c%s "$ACE_DEST" 2>/dev/null || echo 0)" -
 fi
 
 export HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}"
-"$PY" -m pip install -q -U huggingface_hub 2>/dev/null || true
+"$PY" -m pip install -q -U "huggingface_hub>=0.36.2,<1.0" 2>/dev/null || true
 mkdir -p "$MODELS/checkpoints"
 ACE_REPO="${ACE_REPO:-Comfy-Org/ACE-Step_ComfyUI_repackaged}"
 ACE_INCLUDE="${ACE_INCLUDE:-all_in_one/ace_step_v1_3.5b.safetensors}"

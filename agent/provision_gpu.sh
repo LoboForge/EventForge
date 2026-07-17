@@ -1042,9 +1042,9 @@ phase_early_pool_join
 # Quick check + install when missing keeps the SSH-only image rents working.
 if ! command -v hf >/dev/null 2>&1; then
     info "huggingface_hub CLI not found — installing..."
-    pip install -q -U "huggingface_hub[cli]" 2>&1 | tail -3
+    pip install -q -U "huggingface_hub[cli]>=0.36.2,<1.0" 2>&1 | tail -3
     if ! command -v hf >/dev/null 2>&1; then
-        die "Failed to install 'hf' CLI. Try: pip install 'huggingface_hub[cli]'"
+        die "Failed to install 'hf' CLI. Try: pip install 'huggingface_hub[cli]>=0.36.2,<1.0'"
     fi
     success "hf CLI installed."
 fi
