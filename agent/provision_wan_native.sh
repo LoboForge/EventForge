@@ -102,6 +102,16 @@ if [[ -f /tmp/loboforge_worker.tar.gz ]]; then
   "$PY" -c "import loboforge_worker"
 fi
 
+# Do not let a partially refreshed or stale worker package claim Wan jobs. A bad
+# runner previously reached generation with its module cache missing and failed
+# every job with `name '_PIPELINE_CACHE' is not defined`.
+"$PY" - <<'PY' || { echo "FATAL: installed WAN runner cache self-check failed" | tee -a /workspace/provision.log; exit 1; }
+from loboforge_worker.inference.wan import runner
+
+if not isinstance(getattr(runner, "_PIPELINE_CACHE", None), dict):
+    raise RuntimeError("WAN runner _PIPELINE_CACHE is absent or invalid")
+PY
+
 # Disk + GPU gates (fatal — matches provision_gpu.sh / bootstrap_box.py).
 "$PY" - <<'PY' || { echo "FATAL: disk preflight failed" | tee -a /workspace/provision.log; exit 1; }
 import os, sys
