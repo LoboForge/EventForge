@@ -82,7 +82,7 @@ if ! cuda_ok; then
   ldconfig 2>/dev/null || true
 fi
 
-"$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" safetensors 2>/dev/null || true
+"$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" peft safetensors 2>/dev/null || true
 
 rm -rf /workspace/loboforge_worker
 for tarball_url in "${EF_BASE}/agent/loboforge_worker.tar.gz" "${BASE}/agent/loboforge_worker.tar.gz"; do
