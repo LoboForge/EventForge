@@ -95,6 +95,12 @@ GEN_WORKERS_EXPECT=6 bash scripts/patch-vast-fleet-eventforge.sh
 - [agent/worker-bootstrap-env.sh](../agent/worker-bootstrap-env.sh)
 - [agent/loboforge_worker.tar.gz](../agent/loboforge_worker.tar.gz)
 
+### Customer LoRAs
+
+Customer LoRAs are downloaded from EventForge at job-claim time when the worker does not already have the requested file. Hub LoRA synchronization remains a LoboForge operation; it is the fallback/preload path, not the customer asset transport.
+
+New image/video Comfy boxes fetch `/agent/*` from `EVENT_FORGE_URL` before falling back to LoboForge, so they receive the deployed claim-time pull logic. Existing boxes do not self-update: after an agent change, deploy EventForge and run `bash scripts/patch-vast-fleet-eventforge.sh`.
+
 ---
 
 ## EventForge ops API (Vast)

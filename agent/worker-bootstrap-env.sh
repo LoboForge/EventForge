@@ -53,13 +53,21 @@ lobo_use_sqs_agent() {
 # Fetch all GPU agent scripts required for SQS mode (loboforge_agent_sqs imports loboforge_agent_common).
 lobo_fetch_agent_scripts() {
   local dir="${1:-${LOBO_AGENT_DIR:-/workspace}}"
-  local base="${LOBO_BASE_URL:-https://www.loboforge.com}"
+  local base f fetched
+  local bases=("${EVENT_FORGE_URL:-https://eventforge.loboforge.com}")
+  bases+=("${LOBO_BASE_URL:-https://www.loboforge.com}")
   mkdir -p "$dir"
-  local f
   for f in loboforge_agent.py loboforge_agent_sqs.py loboforge_agent_eventforge.py loboforge_agent_common.py wd14_tagger.py; do
-    if ! curl -fsSL -A 'LoboForge-Worker/1.1' "$base/agent/$f" -o "$dir/$f"; then
+    fetched=""
+    for base in "${bases[@]}"; do
+      if curl -fsSL -A 'LoboForge-Worker/1.1' "${base%/}/agent/$f" -o "$dir/$f"; then
+        fetched=1
+        break
+      fi
+    done
+    if [[ -z "$fetched" ]]; then
       [[ "$f" == "wd14_tagger.py" ]] && continue
-      echo "ERROR: could not fetch $base/agent/$f" >&2
+      echo "ERROR: could not fetch an agent copy for $f" >&2
       return 1
     fi
   done

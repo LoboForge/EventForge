@@ -117,9 +117,16 @@ PY="/venv/main/bin/python3"
 # leave a stale loboforge_worker tree (regression: import-before-pip in old bundle).
 _lf_fetch() {
   local file="$1" dest="$2" optional="${3:-0}"
-  if curl -fsSL -A 'LoboForge-Worker/1.1' "$LOBO_BASE_URL/agent/$file" -o "$dest"; then return 0; fi
-  curl -fsSL -A 'LoboForge-Worker/1.1' "$LOBO_SCRIPT_FALLBACK/agent/$file" -o "$dest" \
-    || { [[ "$optional" == 1 ]] && return 0; return 1; }
+  local base
+  local bases=("${EVENT_FORGE_URL:-https://eventforge.loboforge.com}")
+  bases+=("$LOBO_BASE_URL" "$LOBO_SCRIPT_FALLBACK")
+  for base in "${bases[@]}"; do
+    if curl -fsSL -A 'LoboForge-Worker/1.1' "${base%/}/agent/$file" -o "$dest"; then
+      return 0
+    fi
+  done
+  [[ "$optional" == 1 ]] && return 0
+  return 1
 }
 _lf_fetch loboforge_worker.tar.gz /tmp/loboforge_worker.tar.gz
 tar -xzf /tmp/loboforge_worker.tar.gz -C /workspace
