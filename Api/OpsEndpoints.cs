@@ -228,19 +228,28 @@ public static class OpsEndpoints
             if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
                 return Results.Unauthorized();
 
+            var failedSince = body.FailedSince?.ToUniversalTime();
+            if (failedSince == null && body.FailedWithinHours is int hours && hours > 0)
+                failedSince = DateTimeOffset.UtcNow.AddHours(-hours);
+
             var (requeued, ids) = await jobs.RequeueFailedAsync(
                 body.Capability,
                 body.AppId,
                 body.ErrorContains,
                 body.Limit,
-                ct);
+                failedSince,
+                ct,
+                body.JobId);
 
             return Results.Ok(new
             {
                 capability = body.Capability,
                 app_id = body.AppId,
+                job_id = body.JobId,
                 error_contains = body.ErrorContains,
                 limit = body.Limit,
+                failed_within_hours = body.FailedWithinHours,
+                failed_since = failedSince?.ToString("O"),
                 requeued,
                 job_ids_sample = ids.Take(20).ToList(),
             });
@@ -279,6 +288,7 @@ public static class OpsEndpoints
                     body.AppId,
                     body.ErrorContains,
                     body.Limit,
+                    null,
                     ct);
                 requeuedIds = ids;
                 if (requeued > 0)
@@ -817,8 +827,15 @@ public sealed class RequeueFailedRequest
 {
     public string? Capability { get; set; }
     public string? AppId { get; set; }
+    public string? JobId { get; set; }
     public string? ErrorContains { get; set; }
     public int? Limit { get; set; }
+
+    /// <summary>Only requeue jobs that failed within the last N hours. Ignored if <see cref="FailedSince"/> is set.</summary>
+    public int? FailedWithinHours { get; set; }
+
+    /// <summary>Only requeue jobs that failed at/after this timestamp (UTC). Takes precedence over <see cref="FailedWithinHours"/>.</summary>
+    public DateTimeOffset? FailedSince { get; set; }
 }
 
 public sealed class RestoreFromS3Request

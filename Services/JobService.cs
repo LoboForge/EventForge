@@ -517,23 +517,30 @@ public sealed class JobService
         string? appId,
         string? errorContains,
         int? limit,
-        CancellationToken ct)
+        DateTimeOffset? failedSince,
+        CancellationToken ct,
+        string? jobId = null)
     {
         var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
         var app = string.IsNullOrWhiteSpace(appId) ? null : appId.Trim();
         var errSub = string.IsNullOrWhiteSpace(errorContains) ? null : errorContains.Trim();
+        var job = string.IsNullOrWhiteSpace(jobId) ? null : jobId.Trim();
         if (limit is < 1)
             limit = null;
 
         bool Matches(JobRecord j)
         {
             if (j.Status != JobStatus.Failed) return false;
+            if (job != null && !string.Equals(j.JobId, job, StringComparison.OrdinalIgnoreCase))
+                return false;
             if (cap != null && !string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase))
                 return false;
             if (app != null && !string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase))
                 return false;
             if (errSub != null
                 && (j.Error ?? "").IndexOf(errSub, StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            if (failedSince != null && (j.CompletedAt ?? j.CreatedAt) < failedSince.Value)
                 return false;
             return true;
         }
@@ -544,8 +551,8 @@ public sealed class JobService
         {
             _persist.MarkDirty();
             _log.LogInformation(
-                "Ops requeued {Count} failed job(s) capability={Cap} app={App} error_contains={Err}",
-                ids.Count, cap ?? "*", app ?? "*", errSub ?? "*");
+                "Ops requeued {Count} failed job(s) job={Job} capability={Cap} app={App} error_contains={Err} failed_since={Since}",
+                ids.Count, job ?? "*", cap ?? "*", app ?? "*", errSub ?? "*", failedSince?.ToString("O") ?? "*");
         }
         return Task.FromResult((ids.Count, ids));
     }

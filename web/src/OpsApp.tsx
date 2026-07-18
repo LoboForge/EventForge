@@ -442,11 +442,82 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
   )
 }
 
-function FailuresTab({ snapshot }: { snapshot: Snapshot | null }) {
+function FailuresTab({ snapshot, onRefresh }: { snapshot: Snapshot | null; onRefresh: () => void }) {
   const failures = snapshot?.recent_failures ?? []
+  const [busy, setBusy] = useState<number | 'all' | string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [capability, setCapability] = useState('')
+  const caps = Array.from(new Set([
+    ...failures.map((j) => j.capability).filter(Boolean),
+    'wan', 'image', 'ltx', 'ollama',
+  ])).sort((a, b) => a.localeCompare(b))
+
+  async function requeue(opts: {
+    windowHours?: number | null
+    jobId?: string
+    capability?: string
+  }) {
+    const cap = (opts.capability ?? capability).trim()
+    const parts: string[] = []
+    if (opts.jobId) parts.push(`job ${opts.jobId.slice(0, 8)}…`)
+    else if (opts.windowHours == null) parts.push('ALL failed jobs')
+    else parts.push(`failed in last ${opts.windowHours}h`)
+    if (cap && !opts.jobId) parts.push(`capability=${cap}`)
+    const label = parts.join(', ')
+    if (!confirm(`Requeue ${label}? They will be moved back onto the queue and retried.`)) return
+    setBusy(opts.jobId ?? opts.windowHours ?? 'all')
+    setErr(null)
+    setMsg(null)
+    try {
+      const body: Record<string, unknown> = {}
+      if (opts.jobId) body.jobId = opts.jobId
+      if (opts.windowHours != null) body.failedWithinHours = opts.windowHours
+      if (cap) body.capability = cap
+      const r = await opsFetch<{ requeued: number }>('/v1/ops/jobs/requeue-failed', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      setMsg(`Requeued ${r.requeued} failed job(s) (${label}).`)
+      onRefresh()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <div className="card">
-      <h2>Recent failures</h2>
+      {msg && <div className="success">{msg}</div>}
+      {err && <div className="error">{err}</div>}
+      <div className="card-head">
+        <h2>Recent failures</h2>
+        <div className="row" style={{ flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+          <label className="muted" style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+            Capability
+            <select
+              value={capability}
+              onChange={(e) => setCapability(e.target.value)}
+              disabled={busy !== null}
+            >
+              <option value="">all</option>
+              {caps.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </label>
+          <button className="btn secondary" disabled={busy !== null} onClick={() => void requeue({ windowHours: 1 })}>
+            {busy === 1 ? 'Requeuing…' : 'Requeue (1h)'}
+          </button>
+          <button className="btn secondary" disabled={busy !== null} onClick={() => void requeue({ windowHours: 6 })}>
+            {busy === 6 ? 'Requeuing…' : 'Requeue (6h)'}
+          </button>
+          <button className="btn secondary" disabled={busy !== null} onClick={() => void requeue({ windowHours: null })}>
+            {busy === 'all' ? 'Requeuing…' : 'Requeue (All)'}
+          </button>
+        </div>
+      </div>
       <SortableTable
         rows={failures}
         rowKey={(j) => j.job_id}
@@ -487,6 +558,21 @@ function FailuresTab({ snapshot }: { snapshot: Snapshot | null }) {
             header: 'When',
             sortValue: (j) => j.completed_at ?? j.created_at ?? '',
             render: (j) => <span className="muted">{formatDateTime(j.completed_at ?? j.created_at)}</span>,
+          },
+          {
+            id: 'actions',
+            header: '',
+            sortValue: () => '',
+            render: (j) => (
+              <button
+                className="btn secondary small"
+                disabled={busy !== null}
+                onClick={() => void requeue({ jobId: j.job_id })}
+              >
+                {busy === j.job_id ? '…' : 'Requeue'}
+              </button>
+            ),
+            className: 'actions-cell',
           },
         ]}
         emptyMessage="No recent failures."
@@ -625,7 +711,7 @@ export default function OpsApp() {
         />
       )}
       {tab === 'apps' && <AppsTab apps={appRows} onRefresh={() => void refresh()} />}
-      {tab === 'failures' && <FailuresTab snapshot={snapshot} />}
+      {tab === 'failures' && <FailuresTab snapshot={snapshot} onRefresh={() => void refresh()} />}
       {tab === 'vast' && <OpsVastTab />}
       <UploadDock />
     </div>
