@@ -98,12 +98,15 @@ def resolve_lobo_http_base() -> str:
         or "https://www.loboforge.com"
     ).strip().rstrip("/")
     if raw.startswith("wss://"):
-        return "https://" + raw[len("wss://") :]
-    if raw.startswith("ws://"):
-        return "http://" + raw[len("ws://") :]
-    if raw.startswith("https://") or raw.startswith("http://"):
-        return raw
-    return "https://" + raw
+        raw = "https://" + raw[len("wss://") :]
+    elif raw.startswith("ws://"):
+        raw = "http://" + raw[len("ws://") :]
+    elif not (raw.startswith("https://") or raw.startswith("http://")):
+        raw = "https://" + raw
+    # EventForge PublicUrl serves /agent/* only — not LoboForge hub APIs (active-loras, tool-loras).
+    if "eventforge.loboforge.com" in raw.lower():
+        return "https://www.loboforge.com"
+    return raw
 
 
 def resolve_lora_sync_mode(hostname: str | None = None) -> str:
@@ -191,6 +194,13 @@ def _native_ltx_layout_ready() -> bool:
         return Path(ltx_root, "layout.json").is_file()
 
 
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def _find_comfy_models_root() -> Path | None:
     """ComfyUI models tree — used for LoRA sync from loboforge.com active-loras."""
     mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
@@ -199,8 +209,13 @@ def _find_comfy_models_root() -> Path | None:
         os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
     ):
         p = Path(wan_root)
-        if p.is_dir():
+        if _safe_is_dir(p):
             return p
+    models_env = os.environ.get("MODELS")
+    if models_env:
+        mp = Path(models_env)
+        if _safe_is_dir(mp):
+            return mp if mp.name == "models" else mp / "models"
     for candidate in (
         "/opt/workspace-internal/ComfyUI/models",
         "/workspace/ComfyUI/models",
@@ -211,7 +226,7 @@ def _find_comfy_models_root() -> Path | None:
         "/root/comfyui/models",
     ):
         p = Path(candidate)
-        if p.is_dir():
+        if _safe_is_dir(p):
             return p
     try:
         from loboforge_worker.paths import find_models_root
@@ -221,11 +236,6 @@ def _find_comfy_models_root() -> Path | None:
             return root
     except Exception:
         pass
-    models_env = os.environ.get("MODELS")
-    if models_env:
-        mp = Path(models_env)
-        if mp.is_dir():
-            return mp if mp.name == "models" else mp / "models"
     return None
 
 
@@ -390,8 +400,17 @@ def download_eventforge_job_lora(
         log.warning("EventForge LoRA %s too small (%d bytes)", safe, len(data))
         return None
     tmp = dest.with_suffix(dest.suffix + ".partial")
-    tmp.write_bytes(data)
-    tmp.replace(dest)
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    except OSError as ex:
+        if tmp.is_file():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        log.warning("EventForge LoRA write failed for %s: %s", safe, ex)
+        raise
     log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, len(data), job_id[:8])
     return dest
 
@@ -413,6 +432,103 @@ def pull_missing_loras_from_eventforge(
         if path is not None:
             pulled.append(_normalize_lora_basename(name))
     return pulled
+
+def pull_missing_loras_from_loboforge(
+    args: argparse.Namespace,
+    missing: list[str],
+) -> list[str]:
+    """Download specific missing LoRAs from LoboForge catalogs (active-loras + tool-loras).
+
+    Order of sources for a missing LoRA is: EventForge job endpoint first (caller),
+    then this LoboForge fallback. Never run the job until the file is on disk.
+    """
+    wanted = {_normalize_lora_basename(n).lower(): _normalize_lora_basename(n) for n in missing if n}
+    wanted = {k: v for k, v in wanted.items() if k}
+    if not wanted:
+        return []
+
+    secret = (getattr(args, "secret", None) or os.environ.get("LOBO_SECRET") or "").strip()
+    base = resolve_lobo_http_base()
+    if not secret:
+        log.warning("LoboForge LoRA pull skipped — LOBO_SECRET not set")
+        return []
+
+    root = _find_comfy_models_root()
+    if root is None:
+        log.warning("LoboForge LoRA pull skipped — Comfy models root not found")
+        return []
+
+    import json
+    import urllib.error
+    import urllib.request
+
+    mode = resolve_lora_sync_mode(getattr(args, "hostname", None))
+    catalogs: list[tuple[str, str]] = [
+        ("active-loras", f"{base}/api/agent/active-loras?modes={mode}&secret={secret}"),
+        ("tool-loras", f"{base}/api/agent/tool-loras?secret={secret}"),
+        # Broad fallback if mode-filtered active list missed the file
+        ("active-loras-all", f"{base}/api/agent/active-loras?modes=all&secret={secret}"),
+    ]
+
+    # Map basename -> source_url from catalogs
+    url_by_base: dict[str, str] = {}
+    for label, url in catalogs:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "LoboForge-Worker/1.1"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                items = json.loads(resp.read().decode())
+            if not isinstance(items, list):
+                continue
+            for la in items:
+                if not isinstance(la, dict):
+                    continue
+                fp = (la.get("file_path") or la.get("name") or "").strip()
+                su = (la.get("source_url") or "").strip()
+                if not fp or not su:
+                    continue
+                b = _normalize_lora_basename(fp).lower()
+                if b in wanted and b not in url_by_base:
+                    url_by_base[b] = su
+        except Exception as ex:
+            log.warning("LoboForge catalog %s failed: %s", label, ex)
+
+    pulled: list[str] = []
+    min_bytes = 1_000_000
+    loras_dir = root / "loras"
+    loras_dir.mkdir(parents=True, exist_ok=True)
+    for key, basename in wanted.items():
+        if _lora_on_disk(basename):
+            pulled.append(basename)
+            continue
+        su = url_by_base.get(key)
+        if not su:
+            log.warning("LoboForge has no source_url for missing LoRA %s", basename)
+            continue
+        dest = loras_dir / basename
+        if not basename.lower().endswith((".safetensors", ".pt", ".ckpt", ".bin")):
+            # keep original basename from job; catalog may include path
+            dest = loras_dir / Path(basename).name
+        tmp = dest.with_suffix(dest.suffix + ".partial")
+        try:
+            req = urllib.request.Request(su, headers={"User-Agent": "LoboForge-Worker/1.1"})
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = resp.read()
+            if len(data) < min_bytes:
+                log.warning("LoboForge LoRA %s too small (%d bytes)", basename, len(data))
+                continue
+            tmp.write_bytes(data)
+            tmp.replace(dest)
+            pulled.append(_normalize_lora_basename(basename))
+            log.info("Pulled LoboForge LoRA %s (%d bytes)", dest.name, len(data))
+        except Exception as ex:
+            log.warning("LoboForge LoRA download failed %s: %s", basename, ex)
+            if tmp.is_file():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+    return pulled
+
 
 
 def _normalize_lora_basename(raw: str) -> str:
@@ -463,6 +579,42 @@ def extract_required_loras_from_assign(payload: dict) -> list[str]:
     return out
 
 
+def _lora_on_disk(lora_name: str, *, min_bytes: int = 1_000_000) -> bool:
+    target = _normalize_lora_basename(lora_name).lower()
+    if not target:
+        return True
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for d in _native_wan_lora_dirs():
+        key = str(d)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(d)
+    root = _find_comfy_models_root()
+    if root is not None:
+        loras_dir = root / "loras"
+        key = str(loras_dir)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(loras_dir)
+    for d in dirs:
+        if not _safe_is_dir(d):
+            continue
+        for candidate in (d / target, d / lora_name):
+            try:
+                if candidate.is_file() and candidate.stat().st_size >= min_bytes:
+                    return True
+            except OSError:
+                continue
+        try:
+            for f in d.glob("*.safetensors"):
+                if _lora_basenames_match(f.name, target) and f.stat().st_size >= min_bytes:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def worker_has_lora(state: dict, lora_name: str) -> bool:
     if not lora_name:
         return True
@@ -475,15 +627,7 @@ def worker_has_lora(state: dict, lora_name: str) -> bool:
     for k in (state.get("models") or {}).get("loras") or []:
         if _lora_basenames_match(k, target):
             return True
-    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
-    if mode == "wan-native" or os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native":
-        for d in _native_wan_lora_dirs():
-            if (d / target).is_file() or (d / lora_name).is_file():
-                return True
-            for f in d.glob("*.safetensors"):
-                if _lora_basenames_match(f.name, target):
-                    return True
-    return False
+    return _lora_on_disk(lora_name)
 
 
 async def _sync_lora_inventory(state: dict, args) -> None:

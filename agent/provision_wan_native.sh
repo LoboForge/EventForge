@@ -11,10 +11,10 @@ mkdir -p /workspace
 cd /workspace
 
 # Fail fast before any downloads — tiny Vast containers wedge at ~32–45GB.
-WAN_NEED_GB=120
+WAN_NEED_GB=200
 WAN_TOTAL_GB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print int($2/1024)}' || echo "")
 if [[ -n "$WAN_TOTAL_GB" && "$WAN_TOTAL_GB" =~ ^[0-9]+$ && "$WAN_TOTAL_GB" -lt "$WAN_NEED_GB" ]]; then
-  echo "FATAL: Container disk ${WAN_TOTAL_GB}GB < ${WAN_NEED_GB}GB required for wan-native (models ~30GB + venv + headroom). Re-rent with disk≥130GB on host≥120GB." | tee -a /workspace/provision.log
+  echo "FATAL: Container disk ${WAN_TOTAL_GB}GB < ${WAN_NEED_GB}GB required for wan-native. The native runner (LOBO_SKIP_COMFY=1, no ComfyUI) needs the full Wan2.2-I2V-A14B checkpoint (high 57GB + low 57GB + umt5 T5 11.4GB + VAE 0.5GB = ~126GB) plus Wan2.2 repo/venv (~12GB), lightning LoRAs (~1.5GB), hf staging and video temp. Healthy boxes run on 200GB+ (ref inst 45013488 ~23GB free on 200GB). A 170GB box (inst 45255378, 2026-07-18) filled up before the umt5 text-encoder finished and never became claim-ready. Re-rent with disk>=220GB (256GB recommended)." | tee -a /workspace/provision.log
   exit 1
 fi
 
@@ -39,11 +39,38 @@ export LOBO_SECRET LOBO_INSTANCE_ID HF_TOKEN HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
 PY="${PY:-/venv/main/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
+# Durable hf-hub pin (incident 2026-07-18): transformers 4.x REQUIRES huggingface_hub<1.0, but
+# `pip install -U peft` and the child `python -m loboforge_worker` provisioning (Wan2.2
+# requirements + agent deps) silently upgrade hf-hub to 1.24.0. That makes the native Wan runner
+# fail EVERY job with "huggingface-hub>=0.30.0,<1.0 is required". Export PIP_CONSTRAINT so every
+# pip install in this process tree (including child python workers) is blocked from installing
+# hf-hub 1.x. Skipped only when transformers 5.x is present (which needs hf-hub 1.x).
+if ! "$PY" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+  echo 'huggingface_hub>=0.34.0,<1.0' > /workspace/pip-constraints.txt
+  export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+  echo "hf-hub: PIP_CONSTRAINT=/workspace/pip-constraints.txt (transformers 4.x — block hf-hub 1.x)" | tee -a /workspace/provision.log
+fi
+
 EF_BASE="${EVENT_FORGE_URL:-https://eventforge.loboforge.com}"
 EF_BASE="${EF_BASE%/}"
 BASE="${LOBO_BASE_URL:-https://www.loboforge.com}"
 BASE="${BASE%/}"
+if [[ "$BASE" == *eventforge.loboforge.com* ]]; then
+  BASE="https://www.loboforge.com"
+fi
+export LOBO_BASE_URL="$BASE"
 LF_UA="LoboForge-Worker/1.1"
+
+lobo_pin_hf_hub() {
+  local py="${1:-$PY}"
+  if "$py" -c 'import transformers; exit(0 if int(transformers.__version__.split(".")[0]) >= 5 else 1)' 2>/dev/null; then
+    echo "hf-hub: transformers 5.x — keeping hf-hub 1.x" | tee -a /workspace/provision.log
+    return 0
+  fi
+  echo "hf-hub: pinning >=0.34,<1.0 for transformers 4.x" | tee -a /workspace/provision.log
+  "$py" -m pip install -q "huggingface_hub>=0.34.0,<1.0" 2>/dev/null || true
+}
+
 
 
 # VRAM-aware offload defaults: GPUs below 48GB must not warm both MoE experts.
@@ -161,7 +188,8 @@ if ! cuda_ok; then
   ldconfig 2>/dev/null || true
 fi
 
-"$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" peft safetensors 2>/dev/null || true
+"$PY" -m pip install -q -U websockets aiohttp gdown peft safetensors 2>/dev/null || true
+lobo_pin_hf_hub "$PY"
 
 rm -rf /workspace/loboforge_worker
 for tarball_url in "${EF_BASE}/agent/loboforge_worker.tar.gz" "${BASE}/agent/loboforge_worker.tar.gz"; do
@@ -267,3 +295,5 @@ chmod +x /workspace/wan-agent-watchdog.sh 2>/dev/null || true
 service cron start 2>/dev/null || (command -v cron >/dev/null && pgrep -x cron >/dev/null || cron) 2>/dev/null || true
 (crontab -l 2>/dev/null | grep -v wan-agent-watchdog.sh || true
  echo '*/5 * * * * bash /workspace/wan-agent-watchdog.sh >> /workspace/wan-watchdog.log 2>&1') | crontab - 2>/dev/null || true
+
+lobo_pin_hf_hub "$PY"

@@ -216,12 +216,15 @@ def resolve_lobo_http_base() -> str:
         or "https://www.loboforge.com"
     ).strip().rstrip("/")
     if raw.startswith("wss://"):
-        return "https://" + raw[len("wss://") :]
-    if raw.startswith("ws://"):
-        return "http://" + raw[len("ws://") :]
-    if raw.startswith("https://") or raw.startswith("http://"):
-        return raw
-    return "https://" + raw
+        raw = "https://" + raw[len("wss://") :]
+    elif raw.startswith("ws://"):
+        raw = "http://" + raw[len("ws://") :]
+    elif not (raw.startswith("https://") or raw.startswith("http://")):
+        raw = "https://" + raw
+    # EventForge PublicUrl serves /agent/* only — not LoboForge hub APIs (active-loras, tool-loras).
+    if "eventforge.loboforge.com" in raw.lower():
+        return "https://www.loboforge.com"
+    return raw
 
 
 def resolve_lora_sync_mode(hostname: str | None = None) -> str:
@@ -564,16 +567,7 @@ def pull_missing_loras_from_loboforge(
         return []
 
     secret = (getattr(args, "secret", None) or os.environ.get("LOBO_SECRET") or "").strip()
-    base = (
-        getattr(args, "http_base", None)
-        or os.environ.get("LOBO_BASE_URL")
-        or os.environ.get("LOBO_SERVER")
-        or "https://www.loboforge.com"
-    ).strip().rstrip("/")
-    if base.startswith("wss://"):
-        base = "https://" + base[len("wss://"):]
-    elif base.startswith("ws://"):
-        base = "http://" + base[len("ws://"):]
+    base = resolve_lobo_http_base()
     if not secret:
         log.warning("LoboForge LoRA pull skipped — LOBO_SECRET not set")
         return []

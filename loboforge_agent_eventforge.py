@@ -39,6 +39,7 @@ from loboforge_agent_common import (
     resolve_claim_ready_capabilities,
     resolve_lora_sync_mode,
     sync_hub_active_loras,
+    pull_missing_loras_from_loboforge,
     pull_missing_loras_from_eventforge,
     worker_can_run_assign,
     worker_has_lora,
@@ -352,14 +353,40 @@ async def process_ef_job(
                 )
                 await _sync_lora_inventory(state, args)
                 loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
+        except OSError as ex:
+            if ex.errno == 28:
+                await ef_fail(
+                    http, ef_base, worker_key, job_id,
+                    f"disk full — cannot download LoRAs: {ex}",
+                )
+                return
+            log.warning("Pre-job EventForge LoRA pull failed: %s", ex)
         except Exception as ex:
             log.warning("Pre-job EventForge LoRA pull failed: %s", ex)
 
     if not loras_ok:
         try:
+            pulled_lf = await asyncio.to_thread(
+                pull_missing_loras_from_loboforge,
+                args,
+                missing_loras,
+            )
+            if pulled_lf:
+                log.info(
+                    "Pre-job LoboForge LoRA pull for %s: %s",
+                    job_id[:8],
+                    ", ".join(pulled_lf),
+                )
+                await _sync_lora_inventory(state, args)
+                loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
+        except Exception as ex:
+            log.warning("Pre-job LoboForge LoRA pull failed: %s", ex)
+
+    if not loras_ok:
+        try:
             sync_result = await asyncio.to_thread(sync_hub_active_loras, args)
             log.info(
-                "Pre-job LoRA sync mode=%s pulled=%s for missing: %s",
+                "Pre-job LoRA bulk sync mode=%s pulled=%s for missing: %s",
                 sync_result.get("mode"),
                 sync_result.get("pulled"),
                 ", ".join(_normalize_lora_basename(l) for l in missing_loras),
@@ -367,7 +394,7 @@ async def process_ef_job(
             await _sync_lora_inventory(state, args)
             loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
         except Exception as ex:
-            log.warning("Pre-job LoRA sync failed: %s", ex)
+            log.warning("Pre-job LoRA bulk sync failed: %s", ex)
 
     if not loras_ok:
         missing_names = ", ".join(_normalize_lora_basename(l) for l in missing_loras)
@@ -381,7 +408,7 @@ async def process_ef_job(
         log.info("Releasing job %s — missing LoRAs: %s (attempt %d)", job_id[:8], missing_names, count)
         await ef_release(http, ef_base, worker_key, job_id)
         from loboforge_agent_sqs import _enqueue_lora_prefetch
-        _enqueue_lora_prefetch(state, missing_loras)
+        _enqueue_lora_prefetch(state, missing_loras, job_id=job_id)
         return
 
     state.get("_ef_lora_defer_counts", {}).pop(job_id, None)

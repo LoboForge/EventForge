@@ -206,7 +206,11 @@ ak = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("FORGE_QUEUE_ACCESS_K
 sk = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ.get("FORGE_QUEUE_SECRET_KEY") or ""
 keys = {
     "LOBO_GEN_QUEUE": os.environ.get("LOBO_GEN_QUEUE", "sqs"),
-    "LOBO_BASE_URL": os.environ.get("LOBO_BASE_URL", "https://www.loboforge.com"),
+    "LOBO_BASE_URL": (
+        "https://www.loboforge.com"
+        if "eventforge.loboforge.com" in (os.environ.get("LOBO_BASE_URL") or "").lower()
+        else (os.environ.get("LOBO_BASE_URL") or "https://www.loboforge.com")
+    ),
     "LOBO_MODE": os.environ.get("LOBO_MODE") or os.environ.get("MODE", ""),
     "MODE": os.environ.get("MODE") or os.environ.get("LOBO_MODE", ""),
     "LOBO_WAN": os.environ.get("LOBO_WAN", ""),
