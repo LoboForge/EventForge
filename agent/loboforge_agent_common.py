@@ -14,6 +14,124 @@ log = logging.getLogger("gpu-agent-common")
 
 CHECK_IN_INTERVAL = 60
 
+# Disk headroom guard — refuse to claim jobs when the box is nearly out of space,
+# so a single "No space left on device" (Errno 28) box does not cascade-fail the
+# whole queue (e.g. one V100 burning 587 jobs). Thresholds match existing 2 GB
+# convention in loboforge_agent (maybe_free_comfy_disk / busy gate).
+DISK_MIN_FREE_MB = int(os.environ.get("FORGE_QUEUE_DISK_MIN_FREE_MB", "2048"))
+DISK_MIN_FREE_PCT = float(os.environ.get("FORGE_QUEUE_DISK_MIN_FREE_PCT", "5"))
+# Percentage gate only bites when absolute free is also below this cap, so a box
+# with tens of GB free on a large volume (low % but plenty of space) keeps claiming.
+DISK_PCT_ABS_CAP_MB = int(os.environ.get("FORGE_QUEUE_DISK_PCT_ABS_CAP_MB", "20480"))
+
+
+def vision_models_allowed() -> bool:
+    """Vision/tagging models are OFF unless LOBO_ALLOW_VISION=1 (extreme privacy)."""
+    return (os.environ.get("LOBO_ALLOW_VISION") or "").strip().lower() in ("1", "true", "yes")
+
+
+
+def _disk_mounts_to_check() -> list[str]:
+    """Distinct mounts that matter for a job: root + Comfy models + WAN model root."""
+    candidates = ["/"]
+    try:
+        root = _find_comfy_models_root()
+        if root is not None:
+            candidates.append(str(root))
+    except Exception:
+        pass
+    wan_root = (os.environ.get("WAN_MODEL_ROOT") or "").strip()
+    if wan_root:
+        candidates.append(wan_root)
+    seen_dev: set[int] = set()
+    out: list[str] = []
+    for path in candidates:
+        try:
+            dev = os.stat(path).st_dev
+        except OSError:
+            continue
+        if dev in seen_dev:
+            continue
+        seen_dev.add(dev)
+        out.append(path)
+    return out
+
+
+def evaluate_disk_headroom(
+    min_free_mb: int = DISK_MIN_FREE_MB,
+    min_free_pct: float = DISK_MIN_FREE_PCT,
+    pct_abs_cap_mb: int = DISK_PCT_ABS_CAP_MB,
+) -> dict[str, Any]:
+    """Inspect relevant mounts; report ok + the tightest mount's free space."""
+    import shutil
+
+    ok = True
+    worst: dict[str, Any] | None = None
+    worst_free_mb: int | None = None
+    for path in _disk_mounts_to_check():
+        try:
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        free_mb = int(usage.free // (1024 * 1024))
+        pct = (usage.free / usage.total * 100.0) if usage.total else 100.0
+        low_abs = free_mb < min_free_mb
+        low_pct = pct < min_free_pct and free_mb < pct_abs_cap_mb
+        if low_abs or low_pct:
+            ok = False
+        if worst_free_mb is None or free_mb < worst_free_mb:
+            worst_free_mb = free_mb
+            worst = {"path": path, "free_mb": free_mb, "free_pct": round(pct, 2)}
+    return {
+        "ok": ok,
+        "min_free_mb": min_free_mb,
+        "min_free_pct": min_free_pct,
+        "free_mb": worst_free_mb if worst_free_mb is not None else -1,
+        "worst": worst,
+    }
+
+
+def is_disk_full_error(text: Any) -> bool:
+    """True when an error string/exception looks like ENOSPC (Errno 28)."""
+    t = str(text or "").lower()
+    return "errno 28" in t or "no space left" in t or "enospc" in t
+
+
+def mark_disk_full(state: dict, reason: str = "disk_full") -> None:
+    """Force the claim-paused disk-full flag after an observed ENOSPC failure."""
+    if not state.get("disk_full"):
+        log.error("Disk full (ENOSPC) — pausing job claims: %s", reason)
+    state["disk_full"] = True
+    state["claim_paused_reason"] = reason or "disk_full"
+
+
+def refresh_disk_guard(
+    state: dict,
+    *,
+    min_free_mb: int = DISK_MIN_FREE_MB,
+    min_free_pct: float = DISK_MIN_FREE_PCT,
+) -> dict[str, Any]:
+    """Re-evaluate disk headroom each loop; set/clear disk_full + claim_paused_reason."""
+    headroom = evaluate_disk_headroom(min_free_mb, min_free_pct)
+    state["disk_headroom"] = headroom
+    if headroom["ok"]:
+        if state.get("disk_full"):
+            log.warning(
+                "Disk headroom restored (free=%sMB) — resuming job claims",
+                headroom.get("free_mb"),
+            )
+        state["disk_full"] = False
+        state.pop("claim_paused_reason", None)
+    else:
+        if not state.get("disk_full"):
+            log.error(
+                "Disk headroom low (%s, min %sMB/%s%%) — pausing job claims",
+                headroom.get("worst"), min_free_mb, min_free_pct,
+            )
+        state["disk_full"] = True
+        state["claim_paused_reason"] = "disk_full"
+    return headroom
+
 
 def _load_persisted_env() -> None:
     try:
@@ -191,6 +309,13 @@ def _native_ltx_layout_ready() -> bool:
         return Path(ltx_root, "layout.json").is_file()
 
 
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def _find_comfy_models_root() -> Path | None:
     """ComfyUI models tree — used for LoRA sync from loboforge.com active-loras."""
     mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
@@ -199,8 +324,13 @@ def _find_comfy_models_root() -> Path | None:
         os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native" and wan_root
     ):
         p = Path(wan_root)
-        if p.is_dir():
+        if _safe_is_dir(p):
             return p
+    models_env = os.environ.get("MODELS")
+    if models_env:
+        mp = Path(models_env)
+        if _safe_is_dir(mp):
+            return mp if mp.name == "models" else mp / "models"
     for candidate in (
         "/opt/workspace-internal/ComfyUI/models",
         "/workspace/ComfyUI/models",
@@ -211,7 +341,7 @@ def _find_comfy_models_root() -> Path | None:
         "/root/comfyui/models",
     ):
         p = Path(candidate)
-        if p.is_dir():
+        if _safe_is_dir(p):
             return p
     try:
         from loboforge_worker.paths import find_models_root
@@ -221,11 +351,6 @@ def _find_comfy_models_root() -> Path | None:
             return root
     except Exception:
         pass
-    models_env = os.environ.get("MODELS")
-    if models_env:
-        mp = Path(models_env)
-        if mp.is_dir():
-            return mp if mp.name == "models" else mp / "models"
     return None
 
 
@@ -390,8 +515,17 @@ def download_eventforge_job_lora(
         log.warning("EventForge LoRA %s too small (%d bytes)", safe, len(data))
         return None
     tmp = dest.with_suffix(dest.suffix + ".partial")
-    tmp.write_bytes(data)
-    tmp.replace(dest)
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    except OSError as ex:
+        if tmp.is_file():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        log.warning("EventForge LoRA write failed for %s: %s", safe, ex)
+        raise
     log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, len(data), job_id[:8])
     return dest
 
@@ -413,6 +547,113 @@ def pull_missing_loras_from_eventforge(
         if path is not None:
             pulled.append(_normalize_lora_basename(name))
     return pulled
+
+
+def pull_missing_loras_from_loboforge(
+    args: argparse.Namespace,
+    missing: list[str],
+) -> list[str]:
+    """Download specific missing LoRAs from LoboForge catalogs (active-loras + tool-loras).
+
+    Order of sources for a missing LoRA is: EventForge job endpoint first (caller),
+    then this LoboForge fallback. Never run the job until the file is on disk.
+    """
+    wanted = {_normalize_lora_basename(n).lower(): _normalize_lora_basename(n) for n in missing if n}
+    wanted = {k: v for k, v in wanted.items() if k}
+    if not wanted:
+        return []
+
+    secret = (getattr(args, "secret", None) or os.environ.get("LOBO_SECRET") or "").strip()
+    base = (
+        getattr(args, "http_base", None)
+        or os.environ.get("LOBO_BASE_URL")
+        or os.environ.get("LOBO_SERVER")
+        or "https://www.loboforge.com"
+    ).strip().rstrip("/")
+    if base.startswith("wss://"):
+        base = "https://" + base[len("wss://"):]
+    elif base.startswith("ws://"):
+        base = "http://" + base[len("ws://"):]
+    if not secret:
+        log.warning("LoboForge LoRA pull skipped — LOBO_SECRET not set")
+        return []
+
+    root = _find_comfy_models_root()
+    if root is None:
+        log.warning("LoboForge LoRA pull skipped — Comfy models root not found")
+        return []
+
+    import json
+    import urllib.error
+    import urllib.request
+
+    mode = resolve_lora_sync_mode(getattr(args, "hostname", None))
+    catalogs: list[tuple[str, str]] = [
+        ("active-loras", f"{base}/api/agent/active-loras?modes={mode}&secret={secret}"),
+        ("tool-loras", f"{base}/api/agent/tool-loras?secret={secret}"),
+        # Broad fallback if mode-filtered active list missed the file
+        ("active-loras-all", f"{base}/api/agent/active-loras?modes=all&secret={secret}"),
+    ]
+
+    # Map basename -> source_url from catalogs
+    url_by_base: dict[str, str] = {}
+    for label, url in catalogs:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "LoboForge-Worker/1.1"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                items = json.loads(resp.read().decode())
+            if not isinstance(items, list):
+                continue
+            for la in items:
+                if not isinstance(la, dict):
+                    continue
+                fp = (la.get("file_path") or la.get("name") or "").strip()
+                su = (la.get("source_url") or "").strip()
+                if not fp or not su:
+                    continue
+                b = _normalize_lora_basename(fp).lower()
+                if b in wanted and b not in url_by_base:
+                    url_by_base[b] = su
+        except Exception as ex:
+            log.warning("LoboForge catalog %s failed: %s", label, ex)
+
+    pulled: list[str] = []
+    min_bytes = 1_000_000
+    loras_dir = root / "loras"
+    loras_dir.mkdir(parents=True, exist_ok=True)
+    for key, basename in wanted.items():
+        if _lora_on_disk(basename):
+            pulled.append(basename)
+            continue
+        su = url_by_base.get(key)
+        if not su:
+            log.warning("LoboForge has no source_url for missing LoRA %s", basename)
+            continue
+        dest = loras_dir / basename
+        if not basename.lower().endswith((".safetensors", ".pt", ".ckpt", ".bin")):
+            # keep original basename from job; catalog may include path
+            dest = loras_dir / Path(basename).name
+        tmp = dest.with_suffix(dest.suffix + ".partial")
+        try:
+            req = urllib.request.Request(su, headers={"User-Agent": "LoboForge-Worker/1.1"})
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = resp.read()
+            if len(data) < min_bytes:
+                log.warning("LoboForge LoRA %s too small (%d bytes)", basename, len(data))
+                continue
+            tmp.write_bytes(data)
+            tmp.replace(dest)
+            pulled.append(_normalize_lora_basename(basename))
+            log.info("Pulled LoboForge LoRA %s (%d bytes)", dest.name, len(data))
+        except Exception as ex:
+            log.warning("LoboForge LoRA download failed %s: %s", basename, ex)
+            if tmp.is_file():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+    return pulled
+
 
 
 def _normalize_lora_basename(raw: str) -> str:
@@ -463,27 +704,54 @@ def extract_required_loras_from_assign(payload: dict) -> list[str]:
     return out
 
 
+def _lora_on_disk(lora_name: str, *, min_bytes: int = 1_000_000) -> bool:
+    target = _normalize_lora_basename(lora_name).lower()
+    if not target:
+        return True
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for d in _native_wan_lora_dirs():
+        key = str(d)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(d)
+    root = _find_comfy_models_root()
+    if root is not None:
+        loras_dir = root / "loras"
+        key = str(loras_dir)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(loras_dir)
+    for d in dirs:
+        if not _safe_is_dir(d):
+            continue
+        for candidate in (d / target, d / lora_name):
+            try:
+                if candidate.is_file() and candidate.stat().st_size >= min_bytes:
+                    return True
+            except OSError:
+                continue
+        try:
+            for f in d.glob("*.safetensors"):
+                if _lora_basenames_match(f.name, target) and f.stat().st_size >= min_bytes:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def worker_has_lora(state: dict, lora_name: str) -> bool:
+    """True only when the LoRA file is on disk.
+
+    Inventory lists (`known_loras` / Comfy model index) are advisory only —
+    never accept a job based on a stale in-memory list.
+    """
     if not lora_name:
         return True
     target = _normalize_lora_basename(lora_name).lower()
     if not target:
         return True
-    for k in state.get("known_loras") or []:
-        if _lora_basenames_match(k, target):
-            return True
-    for k in (state.get("models") or {}).get("loras") or []:
-        if _lora_basenames_match(k, target):
-            return True
-    mode = (os.environ.get("LOBO_MODE") or os.environ.get("MODE") or "").strip().lower()
-    if mode == "wan-native" or os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native":
-        for d in _native_wan_lora_dirs():
-            if (d / target).is_file() or (d / lora_name).is_file():
-                return True
-            for f in d.glob("*.safetensors"):
-                if _lora_basenames_match(f.name, target):
-                    return True
-    return False
+    return _lora_on_disk(lora_name)
 
 
 async def _sync_lora_inventory(state: dict, args) -> None:
@@ -511,6 +779,7 @@ def resolve_claim_ready_capabilities(
 
 def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]) -> dict[str, Any]:
     gpu_info = agent.get_gpu_info()
+    refresh_disk_guard(agent_state)
     models = agent_state.get("models") or {}
     caps = agent_state.get("forge_queue_capabilities") or []
     claim_ready = resolve_claim_ready_capabilities(agent_state, caps, hostname=args.hostname)
@@ -521,6 +790,7 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "vram_total": gpu_info.get("vram_total", 0),
         "vram_free": agent.get_vram_free(),
         "disk_free_mb": agent.get_disk_free_mb(),
+        "disk_full": bool(agent_state.get("disk_full")),
         "models": _models_for_check_in(models),
         "known_loras": agent_state.get("known_loras", []),
         "busy": agent.agent_fleet_busy(agent_state),
@@ -531,10 +801,14 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "forge_queue_capabilities": list(caps),
         "claim_ready_capabilities": claim_ready,
         "capabilities": {
-            "wd14": agent.WD14_AVAILABLE,
-            "joycaption": agent.JOYCAPTION_AVAILABLE,
+            "wd14": bool(agent.WD14_AVAILABLE) and vision_models_allowed(),
+            "joycaption": bool(agent.JOYCAPTION_AVAILABLE) and vision_models_allowed(),
         },
     }
+    if agent_state.get("claim_paused_reason"):
+        payload["claim_paused_reason"] = agent_state["claim_paused_reason"]
+    if isinstance(agent_state.get("disk_headroom"), dict):
+        payload["disk_headroom"] = agent_state["disk_headroom"]
     gen_mode = (os.environ.get("LOBO_GEN_QUEUE") or "").strip().lower()
     if gen_mode in ("sqs", "eventforge") or caps or os.environ.get("EVENT_FORGE_URL"):
         payload.update(probe_event_forge_access(list(caps)))
@@ -753,6 +1027,8 @@ def worker_can_run_model(
         return _has_lens_text_encoder(assets) or any("lens" in m.lower() for m in assets)
 
     if lower in ("joycaption", "joy-caption"):
+        if not vision_models_allowed():
+            return False
         caps = state.get("capabilities") or {}
         if caps.get("joycaption"):
             return True
@@ -823,5 +1099,7 @@ def worker_can_run_assign(
 ) -> bool:
     model = (assign.get("model") or "").strip()
     if assign.get("caption") or model == "joycaption":
+        if not vision_models_allowed():
+            return False
         return worker_can_run_model(state, "joycaption", hostname=hostname, capability=capability)
     return worker_can_run_model(state, model, hostname=hostname, capability=capability)

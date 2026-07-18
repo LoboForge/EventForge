@@ -23,7 +23,7 @@ export LOBO_SKIP_COMFY="${LOBO_SKIP_COMFY:-1}"
 export LOBO_WAN="${LOBO_WAN:-1}"
 export LOBO_LTX23="${LOBO_LTX23:-0}"
 export LOBO_MUSIC="${LOBO_MUSIC:-0}"
-export LOBO_UNLOAD_MODELS="${LOBO_UNLOAD_MODELS:-0}"
+export LOBO_UNLOAD_MODELS="${LOBO_UNLOAD_MODELS:-}"
 export MODE="${MODE:-wan-native}"
 export LOBO_MODE="${LOBO_MODE:-wan-native}"
 export WAN_MODEL_ROOT="${WAN_MODEL_ROOT:-/workspace/wan-models}"
@@ -44,6 +44,85 @@ EF_BASE="${EF_BASE%/}"
 BASE="${LOBO_BASE_URL:-https://www.loboforge.com}"
 BASE="${BASE%/}"
 LF_UA="LoboForge-Worker/1.1"
+
+
+# VRAM-aware offload defaults: GPUs below 48GB must not warm both MoE experts.
+lobo_detect_wan_vram_gb() {
+  local mib gb
+  mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " " || true)"
+  if [[ -n "$mib" && "$mib" =~ ^[0-9]+$ ]]; then
+    gb=$(( (mib + 512) / 1024 ))
+    echo "$gb"
+    return 0
+  fi
+  echo "0"
+}
+
+lobo_apply_wan_vram_env() {
+  local gb="${1:-0}"
+  export WAN_VRAM_GB="$gb"
+  if [[ -z "${LOBO_UNLOAD_MODELS:-}" ]]; then
+    if [[ "$gb" -eq 0 || "$gb" -lt 48 ]]; then
+      export LOBO_UNLOAD_MODELS=1
+      export WAN_LOW_VRAM=1
+    else
+      export LOBO_UNLOAD_MODELS=0
+      export WAN_LOW_VRAM=0
+    fi
+  fi
+  echo "wan-vram: ${gb}GB unload_models=${LOBO_UNLOAD_MODELS:-?} low_vram=${WAN_LOW_VRAM:-?}" | tee -a /workspace/provision.log
+}
+
+lobo_apply_wan_expert_swap_patch() {
+  local py="${PY:-/venv/main/bin/python3}"
+  for patch_url in "${EF_BASE}/agent/force_expert_swap.py" "${BASE}/agent/force_expert_swap.py"; do
+    if lf_fetch "$patch_url" /tmp/force_expert_swap.py 2>/dev/null; then break; fi
+  done
+  if [[ ! -f /tmp/force_expert_swap.py ]]; then
+    echo "WARN: force_expert_swap.py unavailable — skipping runner patch" | tee -a /workspace/provision.log
+    return 0
+  fi
+  "$py" /tmp/force_expert_swap.py 2>&1 | tee -a /workspace/provision.log || {
+    echo "WARN: force_expert_swap.py failed" | tee -a /workspace/provision.log
+    return 0
+  }
+}
+
+lobo_write_start_wan_agent_script() {
+  cat > /workspace/start-wan-agent.sh <<'AGENT'
+#!/bin/bash
+set -euo pipefail
+cd /workspace
+set -a
+source /workspace/.loboforge-env
+set +a
+export PYTHONPATH=/workspace${PYTHONPATH:+:$PYTHONPATH}
+export LOBO_EXECUTOR=native
+export LOBO_SKIP_COMFY=1
+export LOBO_WAN=1
+export LOBO_LTX23=0
+export LOBO_MUSIC=0
+export LOBO_UNLOAD_MODELS="${LOBO_UNLOAD_MODELS:-1}"
+export WAN_LOW_VRAM="${WAN_LOW_VRAM:-1}"
+export MODE=wan-native
+export LOBO_MODE=wan-native
+export WAN_MODEL_ROOT=/workspace/wan-models
+export WAN_REPO=/workspace/Wan2.2
+export HF_HUB_DISABLE_XET=1
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+unset HF_ENDPOINT
+: "${LOBO_SECRET:?LOBO_SECRET missing}"
+HN="${LOBO_HOSTNAME:-loboforge-wan-native-${CONTAINER_ID:-box}}"
+pids=$(pgrep -f '[l]oboforge_agent_eventforge.py' || true)
+if [ -n "${pids:-}" ]; then kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true; fi
+tmux kill-session -t loboforge-agent 2>/dev/null || true
+sleep 1
+nohup /venv/main/bin/python3 /workspace/loboforge_agent_eventforge.py   --secret "${LOBO_SECRET}"   --hostname "${HN}"   --capability wan >> /workspace/agent.log 2>&1 &
+echo "agent_pid=$! hostname=${HN}"
+AGENT
+  chmod +x /workspace/start-wan-agent.sh
+}
+
 
 lf_fetch() {
   local url="$1" dest="$2"

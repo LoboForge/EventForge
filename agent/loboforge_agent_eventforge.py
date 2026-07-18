@@ -30,16 +30,21 @@ import aiohttp
 
 import loboforge_agent as agent
 from loboforge_agent_common import (
+    vision_models_allowed,
     CHECK_IN_INTERVAL,
     _lora_basenames_match,
     _normalize_lora_basename,
     _sync_lora_inventory,
     build_check_in_payload,
     extract_required_loras_from_assign,
+    is_disk_full_error,
+    mark_disk_full,
+    refresh_disk_guard,
     resolve_claim_ready_capabilities,
     resolve_lora_sync_mode,
     sync_hub_active_loras,
     pull_missing_loras_from_eventforge,
+    pull_missing_loras_from_loboforge,
     worker_can_run_assign,
     worker_has_lora,
 )
@@ -63,6 +68,7 @@ def _resolve_ef_url() -> str:
 DEFAULT_EF = _resolve_ef_url()
 DEFAULT_WORKER_KEY = os.environ.get("EVENT_FORGE_WORKER_KEY", "wrath-worker-key")
 CLAIM_IDLE_SECS = float(os.environ.get("EVENT_FORGE_CLAIM_IDLE", "2"))
+DISK_FULL_IDLE_SECS = float(os.environ.get("EVENT_FORGE_DISK_FULL_IDLE", "30"))
 UPLOAD_RETRIES = int(os.environ.get("EVENT_FORGE_UPLOAD_RETRIES", "5"))
 
 
@@ -352,14 +358,54 @@ async def process_ef_job(
                 )
                 await _sync_lora_inventory(state, args)
                 loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
+        except OSError as ex:
+            if ex.errno == 28 or is_disk_full_error(ex):
+                mark_disk_full(state, "disk_full")
+                log.error(
+                    "Disk full during LoRA download for %s — releasing job and pausing claims",
+                    job_id[:8],
+                )
+                await ef_release(http, ef_base, worker_key, job_id)
+                return
+            log.warning("Pre-job EventForge LoRA pull failed: %s", ex)
         except Exception as ex:
             log.warning("Pre-job EventForge LoRA pull failed: %s", ex)
 
     if not loras_ok:
+        # LoboForge fallback — pull the *specific* missing LoRAs (not bulk mode sync alone).
+        try:
+            pulled_lf = await asyncio.to_thread(
+                pull_missing_loras_from_loboforge,
+                args,
+                missing_loras,
+            )
+            if pulled_lf:
+                log.info(
+                    "Pre-job LoboForge LoRA pull for %s: %s",
+                    job_id[:8],
+                    ", ".join(pulled_lf),
+                )
+                await _sync_lora_inventory(state, args)
+                loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
+        except OSError as ex:
+            if ex.errno == 28 or is_disk_full_error(ex):
+                mark_disk_full(state, "disk_full")
+                log.error(
+                    "Disk full during LoboForge LoRA download for %s — releasing job and pausing claims",
+                    job_id[:8],
+                )
+                await ef_release(http, ef_base, worker_key, job_id)
+                return
+            log.warning("Pre-job LoboForge LoRA pull failed: %s", ex)
+        except Exception as ex:
+            log.warning("Pre-job LoboForge LoRA pull failed: %s", ex)
+
+    if not loras_ok:
+        # Last resort: bulk active-loras sync for this box mode (may still miss tool-only LoRAs).
         try:
             sync_result = await asyncio.to_thread(sync_hub_active_loras, args)
             log.info(
-                "Pre-job LoRA sync mode=%s pulled=%s for missing: %s",
+                "Pre-job LoRA bulk sync mode=%s pulled=%s for missing: %s",
                 sync_result.get("mode"),
                 sync_result.get("pulled"),
                 ", ".join(_normalize_lora_basename(l) for l in missing_loras),
@@ -367,7 +413,7 @@ async def process_ef_job(
             await _sync_lora_inventory(state, args)
             loras_ok, missing_loras = await check_assign_job_loras_sqs(args, state, assign)
         except Exception as ex:
-            log.warning("Pre-job LoRA sync failed: %s", ex)
+            log.warning("Pre-job LoRA bulk sync failed: %s", ex)
 
     if not loras_ok:
         missing_names = ", ".join(_normalize_lora_basename(l) for l in missing_loras)
@@ -378,10 +424,13 @@ async def process_ef_job(
         if count >= max_defers:
             await ef_fail(http, ef_base, worker_key, job_id, f"missing LoRAs after {count} attempts: {missing_names}")
             return
-        log.info("Releasing job %s — missing LoRAs: %s (attempt %d)", job_id[:8], missing_names, count)
+        log.info(
+            "Releasing job %s — refusing to run without LoRAs on disk: %s (attempt %d; EF then LoboForge tried)",
+            job_id[:8], missing_names, count,
+        )
         await ef_release(http, ef_base, worker_key, job_id)
         from loboforge_agent_sqs import _enqueue_lora_prefetch
-        _enqueue_lora_prefetch(state, missing_loras)
+        _enqueue_lora_prefetch(state, missing_loras, job_id=job_id)
         return
 
     state.get("_ef_lora_defer_counts", {}).pop(job_id, None)
@@ -399,7 +448,14 @@ async def process_ef_job(
     if session.failed_reason:
         reason = session.failed_reason
         rl = reason.lower()
-        if reason.startswith("Text encoder not on worker"):
+        if is_disk_full_error(reason):
+            mark_disk_full(state, "disk_full")
+            log.error(
+                "Disk full during job %s — releasing and pausing claims: %s",
+                job_id[:8], reason[:200],
+            )
+            await ef_release(http, ef_base, worker_key, job_id)
+        elif reason.startswith("Text encoder not on worker"):
             log.info("Releasing job %s — %s", job_id[:8], reason)
             await ef_release(http, ef_base, worker_key, job_id)
         elif "not provisioned" in rl or "layout.json missing" in rl:
@@ -522,7 +578,22 @@ async def ef_consumer_loop(
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue
 
+        # Disk headroom guard: never claim when nearly out of space, else one box
+        # with "No space left on device" cascade-fails the whole queue.
+        refresh_disk_guard(state)
+        if state.get("disk_full"):
+            hr = state.get("disk_headroom") or {}
+            log.warning(
+                "Skipping claim — disk full (free=%sMB, min=%sMB); waiting for space",
+                hr.get("free_mb"), hr.get("min_free_mb"),
+            )
+            await asyncio.sleep(DISK_FULL_IDLE_SECS)
+            continue
+
         ready = list(state.get("claim_ready_capabilities") or [])
+        # Never claim caption/joycaption work — vision models are a privacy violation.
+        if not vision_models_allowed():
+            ready = [c for c in ready if c not in ("caption", "joycaption", "joy-caption")]
         if not ready:
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue
@@ -588,7 +659,12 @@ async def run_ef_agent(args: argparse.Namespace) -> None:
         start_sqs_background_provision = None  # type: ignore[misc, assignment]
 
     http_timeout = aiohttp.ClientTimeout(total=120)
-    prov_task = await start_sqs_background_provision(args, agent_state) if start_sqs_background_provision else None
+    prov_task = None
+    if start_sqs_background_provision:
+        try:
+            prov_task = await start_sqs_background_provision(args, agent_state)
+        except Exception as ex:
+            log.warning("Background provision start failed (continuing to claim): %s", ex)
     async with aiohttp.ClientSession(timeout=http_timeout) as http:
         if not await ef_api_check_in_once(http, args, agent_state, ef_base, worker_key):
             log.warning("Initial EventForge check-in failed — will not claim until check-in succeeds")

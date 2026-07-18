@@ -42,12 +42,16 @@ except ImportError:
 ensure_loboforge_env()
 
 # ── Optional WD14 auto-tagging ─────────────────────────────────────────────
+# PRIVACY (extreme): never run vision / image-understanding models on queue or
+# disk images (WD14, JoyCaption, etc.) unless explicitly opted in.
+# Opt-in ONLY via LOBO_ALLOW_VISION=1 — default is OFF for the entire fleet.
+_ALLOW_VISION = (os.environ.get("LOBO_ALLOW_VISION") or "").strip().lower() in ("1", "true", "yes")
+
 # Imported lazily so the agent still works on boxes without onnxruntime/Pillow.
-# When available, each generated image is tagged before it's sent to the server
-# and the result is piggybacked onto the file_begin message.
+# Even if imports succeed, capabilities stay OFF unless _ALLOW_VISION.
 try:
     import wd14_tagger  # noqa: F401
-    WD14_AVAILABLE = True
+    WD14_AVAILABLE = bool(_ALLOW_VISION)
 except Exception as _wd14_e:
     wd14_tagger = None
     WD14_AVAILABLE = False
@@ -55,11 +59,16 @@ except Exception as _wd14_e:
 
 try:
     import joycaption_runner
-    JOYCAPTION_AVAILABLE = joycaption_runner.is_available()
+    JOYCAPTION_AVAILABLE = bool(_ALLOW_VISION) and joycaption_runner.is_available()
 except Exception as _jc_e:
     joycaption_runner = None
     JOYCAPTION_AVAILABLE = False
     _JOYCAPTION_IMPORT_ERROR = str(_jc_e)
+
+if not _ALLOW_VISION:
+    # Ensure modules cannot be used even if somehow referenced later.
+    wd14_tagger = None  # type: ignore[assignment]
+    joycaption_runner = None  # type: ignore[assignment]
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_SERVER       = "wss://loboforge.com"
@@ -498,6 +507,15 @@ def _is_native_wan_box() -> bool:
     # Comfy-provisioned video/image boxes must not route to native Wan (hostname may say wan-native).
     if mode in ("video", "image", "all"):
         return False
+    hn = (os.environ.get("LOBO_HOSTNAME") or "").lower()
+    if mode == "ltx-native" or hn.startswith("loboforge-ltx"):
+        return False
+    try:
+        from loboforge_worker.executor_mode import is_native_ltx_hostname
+        if is_native_ltx_hostname():
+            return False
+    except ImportError:
+        pass
     if mode == "wan-native" or os.environ.get("LOBO_EXECUTOR", "").strip().lower() == "native":
         return True
     try:
@@ -1444,7 +1462,8 @@ async def _tag_image_async(data: bytes, mime_type: str) -> Optional[dict]:
     Run WD14 in a worker thread so the asyncio loop isn't blocked.
     Returns the tag result dict, or None if WD14 is unavailable / failed.
     """
-    if not WD14_AVAILABLE or wd14_tagger is None:
+    # EXTREME PRIVACY: never vision-tag queue/disk/generated images unless LOBO_ALLOW_VISION=1.
+    if not _ALLOW_VISION or not WD14_AVAILABLE or wd14_tagger is None:
         return None
     if not mime_type or not mime_type.startswith("image/"):
         return None
@@ -2232,6 +2251,15 @@ async def apply_ref_images_to_graph(graph: dict, ref_images, args) -> tuple:
 
 async def handle_joycaption_job(session: ServerWsSession, msg: dict, args, state: dict | None = None) -> None:
     """Joycaption fleet job — fetch image from presigned S3 URL, return caption text."""
+    # EXTREME PRIVACY: refuse caption/vision jobs unless LOBO_ALLOW_VISION=1.
+    if not _ALLOW_VISION:
+        log.error("Refusing joycaption job — vision models disabled (privacy)")
+        await session.send_json({
+            "type": "job_failed",
+            "job_uuid": msg.get("job_uuid"),
+            "reason": "vision models disabled (privacy)",
+        })
+        return
     job_uuid = msg.get("job_uuid", "")
     ref_images = msg.get("ref_images") or []
     image_url = None

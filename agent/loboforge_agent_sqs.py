@@ -437,13 +437,15 @@ async def api_request_work_download(
         return mtype or None
 
 
-def _enqueue_lora_prefetch(state: dict, missing: list[str]) -> None:
+def _enqueue_lora_prefetch(state: dict, missing: list[str], *, job_id: str | None = None) -> None:
     """Track LoRAs a deferred job needs — background loop will fetch via request-work."""
     wanted: set[str] = state.setdefault("_lora_prefetch_wanted", set())
     for name in missing:
         base = _normalize_lora_basename(name)
         if base:
             wanted.add(base)
+    if job_id:
+        state["_lora_prefetch_ef_job_id"] = job_id.strip()
 
 
 def _reconcile_lora_prefetch_wanted(state: dict) -> None:
@@ -490,6 +492,29 @@ async def sqs_lora_prefetch_loop(
         try:
             if wanted:
                 try:
+                    ef_job_id = (state.get("_lora_prefetch_ef_job_id") or "").strip()
+                    if ef_job_id:
+                        from loboforge_agent_common import pull_missing_loras_from_eventforge
+
+                        pulled = await asyncio.to_thread(
+                            pull_missing_loras_from_eventforge,
+                            args,
+                            ef_job_id,
+                            sorted(wanted),
+                        )
+                        if pulled:
+                            log.info(
+                                "Background EventForge LoRA pull for %s: %s",
+                                ef_job_id[:8],
+                                ", ".join(pulled),
+                            )
+                        await _sync_lora_inventory(state, args)
+                        _reconcile_lora_prefetch_wanted(state)
+                        if not state.get("_lora_prefetch_wanted"):
+                            state.pop("_lora_prefetch_ef_job_id", None)
+                            backoff = 2.0
+                            continue
+
                     from loboforge_agent_common import resolve_lora_sync_mode, sync_hub_active_loras
 
                     mode = resolve_lora_sync_mode(args.hostname)
@@ -497,6 +522,7 @@ async def sqs_lora_prefetch_loop(
                     await _sync_lora_inventory(state, args)
                     _reconcile_lora_prefetch_wanted(state)
                     if not state.get("_lora_prefetch_wanted"):
+                        state.pop("_lora_prefetch_ef_job_id", None)
                         backoff = 2.0
                         continue
                 except Exception as ex:
