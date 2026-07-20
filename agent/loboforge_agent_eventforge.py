@@ -36,6 +36,7 @@ from loboforge_agent_common import (
     _normalize_lora_basename,
     _sync_lora_inventory,
     build_check_in_payload,
+    comfy_inventory_stale_vs_disk,
     extract_required_loras_from_assign,
     is_disk_full_error,
     mark_disk_full,
@@ -637,6 +638,73 @@ async def ef_lora_sync_loop(args: argparse.Namespace, state: dict) -> None:
         await asyncio.sleep(interval)
 
 
+async def ef_claim_ready_reconcile_loop(
+    args: argparse.Namespace,
+    state: dict,
+) -> None:
+    """Recover claim_ready after model weights land on disk post-startup.
+
+    Two systemic failures this fixes for video/wan boxes:
+      1. The box inventories models at startup, *before* the 74GB Wan fp8 download
+         finishes, so claim_ready starts empty. The 60s check-in loop re-queries
+         Comfy, but ComfyUI caches its diffusion_models folder listing at boot —
+         so a download that completes later is never indexed and claim_ready
+         stays empty *forever* until a human restarts ComfyUI.
+      2. Native Wan/LTX boxes whose layout/weights sync completes after startup.
+
+    This loop re-inventories on a short cadence and, when Wan weights are present
+    on disk but Comfy's UNET list is stale, force-restarts ComfyUI (idle only,
+    rate-limited) so the download is indexed and claim_ready populates on its own.
+    """
+    interval = max(15.0, float(os.environ.get("EVENT_FORGE_REINDEX_INTERVAL", "45")))
+    while True:
+        await asyncio.sleep(interval)
+        if state.get("current_job") or agent.agent_fleet_busy(state):
+            continue
+
+        caps = list(state.get("forge_queue_capabilities") or [])
+        if not caps:
+            continue
+        ready_before = list(state.get("claim_ready_capabilities") or [])
+        # Only intervene when the box *should* be serving something it currently isn't.
+        missing = [c for c in caps if c not in ready_before]
+        if not missing:
+            continue
+
+        try:
+            models = await agent.get_available_models(args.comfyui_http)
+            state["models"] = models
+            known = state.setdefault("known_loras", [])
+            for name in models.get("loras") or []:
+                base_name = _normalize_lora_basename(name)
+                if base_name and not any(_lora_basenames_match(k, base_name) for k in known):
+                    known.append(base_name)
+        except Exception as ex:
+            log.debug("reconcile model query failed: %s", ex)
+            continue
+
+        # Weights on disk but Comfy's UNET cache is stale → re-index via restart.
+        if comfy_inventory_stale_vs_disk(state, hostname=args.hostname):
+            log.warning(
+                "Wan weights present on disk but Comfy UNET inventory is stale — "
+                "forcing ComfyUI re-index so claim_ready can populate",
+            )
+            if await agent.force_restart_comfyui(args):
+                try:
+                    state["models"] = await agent.get_available_models(args.comfyui_http)
+                except Exception as ex:
+                    log.debug("reconcile re-query after restart failed: %s", ex)
+
+        ready_after = resolve_claim_ready_capabilities(state, caps, hostname=args.hostname)
+        state["claim_ready_capabilities"] = ready_after
+        if set(ready_after) != set(ready_before):
+            log.info(
+                "claim_ready reconciled: %s -> %s",
+                ",".join(ready_before) or "none",
+                ",".join(ready_after) or "none",
+            )
+
+
 async def run_ef_agent(args: argparse.Namespace) -> None:
     ef_base = _resolve_ef_url()
     worker_key = os.environ.get("EVENT_FORGE_WORKER_KEY") or DEFAULT_WORKER_KEY
@@ -673,6 +741,7 @@ async def run_ef_agent(args: argparse.Namespace) -> None:
             sqs_lora_prefetch_loop(http, args, agent_state),
             ef_lora_sync_loop(args, agent_state),
             ef_api_check_in_loop(http, args, agent_state, ef_base, worker_key),
+            ef_claim_ready_reconcile_loop(args, agent_state),
             agent.comfy_watchdog(args, agent_state, NoopSession()),
         ]
         if prov_task is not None:

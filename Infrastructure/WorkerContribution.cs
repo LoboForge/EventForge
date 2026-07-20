@@ -35,14 +35,32 @@ public static class WorkerContribution
         if (w.DiskFreeMb is > 0 and < 12_000 && (hn.Contains("wan") || hn.Contains("video") || hn.Contains("image") || hn.Contains("all")))
             badges.Add("disk-low");
 
-        if (hn.Contains("wan-native") && !w.Busy && w.ClaimReadyCapabilities.Count == 0 && !w.CheckInStale)
-            badges.Add("wan-not-ready");
+        // A recently-rented box that is checking in healthily but has no models yet is
+        // still provisioning (e.g. mid 74GB Wan fp8 download), not broken. Emit a benign
+        // "provisioning" badge instead of the reap-worthy not-ready/idle badges so
+        // monitors and ops do not quarantine or terminate it before it finishes.
+        var provisioning = isGen
+            && !w.Quarantined
+            && !w.CheckInStale
+            && !w.Busy
+            && w.ClaimReadyCapabilities.Count == 0
+            && w.WithinProvisioningGrace;
 
-        if (isGen && !w.Busy && w.ClaimReadyCapabilities.Count == 0 && !w.CheckInStale)
-            badges.Add("no-claim-ready");
+        if (provisioning)
+        {
+            badges.Add("provisioning");
+        }
+        else
+        {
+            if (hn.Contains("wan-native") && !w.Busy && w.ClaimReadyCapabilities.Count == 0 && !w.CheckInStale)
+                badges.Add("wan-not-ready");
 
-        if (isGen && !w.Busy && w.JobsCompleted == 0 && w.JobsClaimed == 0 && !w.CheckInStale)
-            badges.Add("idle-no-jobs");
+            if (isGen && !w.Busy && w.ClaimReadyCapabilities.Count == 0 && !w.CheckInStale)
+                badges.Add("no-claim-ready");
+
+            if (isGen && !w.Busy && w.JobsCompleted == 0 && w.JobsClaimed == 0 && !w.CheckInStale)
+                badges.Add("idle-no-jobs");
+        }
 
         if (w.Busy && string.IsNullOrWhiteSpace(w.CurrentJobUuid) && string.IsNullOrWhiteSpace(w.ActiveJobId))
             badges.Add("busy-no-job-id");

@@ -8,6 +8,27 @@ public sealed class WorkerFleetTracker
     private readonly ConcurrentDictionary<string, WorkerStats> _workers = new(StringComparer.OrdinalIgnoreCase);
     public static readonly TimeSpan CheckInStaleAfter = TimeSpan.FromSeconds(90);
 
+    /// <summary>
+    /// Newly-seen workers get a grace window before empty claim_ready / no-jobs is
+    /// treated as a fault. A rented box still pulling the 74GB Wan fp8 weights checks
+    /// in healthy with no models for many minutes; without grace, reapers/monitors
+    /// quarantine it as "not ready / instance gone" before provisioning even finishes.
+    /// Override with EVENTFORGE_WORKER_PROVISION_GRACE_MINUTES.
+    /// </summary>
+    public static readonly TimeSpan NewWorkerGracePeriod = ResolveGracePeriod();
+
+    private static TimeSpan ResolveGracePeriod()
+    {
+        var raw = Environment.GetEnvironmentVariable("EVENTFORGE_WORKER_PROVISION_GRACE_MINUTES");
+        if (!string.IsNullOrWhiteSpace(raw)
+            && double.TryParse(raw, out var minutes)
+            && minutes is > 0 and <= 24 * 60)
+        {
+            return TimeSpan.FromMinutes(minutes);
+        }
+        return TimeSpan.FromMinutes(30);
+    }
+
     public void RegisterCheckIn(string workerKey, WorkerCheckInPayload payload)
     {
         var fleetKey = ResolveFleetKey(workerKey, payload.NodeUuid, payload.Hostname);
@@ -213,7 +234,9 @@ public sealed class WorkerFleetTracker
 
     private static WorkerSnapshot ToSnapshot(WorkerStats w)
     {
-        var cutoff = DateTimeOffset.UtcNow - CheckInStaleAfter;
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now - CheckInStaleAfter;
+        var age = now - w.FirstSeenUtc;
         return new WorkerSnapshot
         {
             WorkerId = w.WorkerKey,
@@ -249,6 +272,9 @@ public sealed class WorkerFleetTracker
             QuarantineReason = w.QuarantineReason,
             QuarantinedAtUtc = w.QuarantinedAtUtc,
             QuarantinedBy = w.QuarantinedBy,
+            FirstSeenAt = w.FirstSeenUtc.ToString("O"),
+            AgeSeconds = Math.Max(0, age.TotalSeconds),
+            WithinProvisioningGrace = age < NewWorkerGracePeriod,
         };
     }
 
@@ -341,6 +367,7 @@ public sealed class WorkerFleetTracker
         public string? QuarantineReason { get; set; }
         public DateTimeOffset? QuarantinedAtUtc { get; set; }
         public string? QuarantinedBy { get; set; }
+        public DateTimeOffset FirstSeenUtc { get; set; } = DateTimeOffset.UtcNow;
         public List<string> KnownLoras { get; set; } = [];
         public string? ModelsJson { get; set; }
         public string State { get; set; } = "idle";
@@ -418,4 +445,10 @@ public sealed class WorkerSnapshot
     public string? QuarantineReason { get; init; }
     public DateTimeOffset? QuarantinedAtUtc { get; init; }
     public string? QuarantinedBy { get; init; }
+    /// <summary>First time this fleet row checked in (ISO-8601). Basis for provisioning grace.</summary>
+    public string FirstSeenAt { get; init; } = "";
+    /// <summary>Seconds since first check-in.</summary>
+    public double AgeSeconds { get; init; }
+    /// <summary>True while a recently-seen box is still inside the provisioning grace window.</summary>
+    public bool WithinProvisioningGrace { get; init; }
 }

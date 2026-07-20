@@ -77,6 +77,10 @@ public static class FleetEndpoints
                     jobs_timed_out = w.JobsTimedOut,
                     jobs_released = w.JobsReleased,
                     last_seen_at = w.LastSeenAt,
+                    first_seen_at = w.FirstSeenAt,
+                    age_seconds = w.AgeSeconds,
+                    provisioning_grace = w.WithinProvisioningGrace,
+                    check_in_stale = w.CheckInStale,
                 }).ToList(),
             });
         });

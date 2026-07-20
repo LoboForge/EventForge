@@ -585,6 +585,40 @@ async def ensure_comfyui_running(args, allow_restart: bool = True) -> bool:
     return False
 
 
+async def force_restart_comfyui(args) -> bool:
+    """Kill + relaunch ComfyUI so newly downloaded weights get indexed.
+
+    Unlike ``ensure_comfyui_running`` (which only acts when Comfy is *down*), this
+    restarts a *healthy* Comfy whose folder cache is stale after a large model
+    download — the root cause of Wan boxes that stay ``claim_ready=[]`` until a
+    human restarts them. Rate-limited by the same cooldown; idle callers only.
+    """
+    global _comfy_last_restart
+    if _is_skip_comfy() or not _manages_comfy(args):
+        return False
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    if now - _comfy_last_restart < COMFY_RESTART_COOLDOWN:
+        log.info("ComfyUI re-index restart skipped — cooldown active")
+        return False
+    comfy_dir = _find_comfy_dir(args)
+    if not comfy_dir:
+        log.warning("ComfyUI re-index restart skipped — ComfyUI dir not found")
+        return False
+    port = _comfy_port_from_url(args.comfyui_http)
+    log.warning("Restarting ComfyUI to re-index newly downloaded weights")
+    await loop.run_in_executor(None, _start_comfyui_tmux, comfy_dir, port)
+    _comfy_last_restart = now
+    deadline = now + COMFY_STARTUP_WAIT
+    while loop.time() < deadline:
+        await asyncio.sleep(5)
+        if await comfyui_is_healthy(args.comfyui_http):
+            log.info("ComfyUI healthy after re-index restart")
+            return True
+    log.error("ComfyUI failed to respond after re-index restart")
+    return False
+
+
 async def load_models_with_retry(args, max_wait: float = 30.0) -> dict:
     """Query model inventory; restart ComfyUI if still empty after a short wait."""
     models = await get_available_models(args.comfyui_http)

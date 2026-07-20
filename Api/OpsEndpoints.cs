@@ -711,6 +711,10 @@ public static class OpsEndpoints
             quarantine_reason = w.QuarantineReason,
             quarantined_at = w.QuarantinedAtUtc?.ToString("O"),
             quarantined_by = w.QuarantinedBy,
+            first_seen_at = w.FirstSeenAt,
+            age_seconds = w.AgeSeconds,
+            provisioning_grace = w.WithinProvisioningGrace,
+            provisioning = badges.Contains("provisioning"),
             contributing = badges.Count == 0,
             badges,
         };

@@ -771,6 +771,30 @@ def resolve_claim_ready_capabilities(
     ]
 
 
+def comfy_inventory_stale_vs_disk(state: dict, *, hostname: str | None = None) -> bool:
+    """True when Wan weights are on disk but Comfy's UNET inventory hasn't picked them up.
+
+    ComfyUI caches its diffusion_models folder listing at startup; a 74GB fp8 Wan
+    download that finishes *after* Comfy booted is not reflected in
+    ``/object_info/UNETLoader`` until Comfy re-indexes (historically a manual
+    restart). When that happens ``claim_ready`` for wan stays empty forever even
+    though the files are present. Detecting this lets the agent force a re-index
+    instead of waiting for a human.
+
+    Native Wan/LTX boxes read the disk layout directly (no Comfy inventory), so
+    they never hit this and always return False.
+    """
+    if _is_native_wan_box(hostname) or _is_native_ltx_box(hostname):
+        return False
+    models = state.get("models") or {}
+    unets = list(models.get("unets") or [])
+    if _comfy_wan_disk_ready(kind="i2v") and not _wan_noise_pair_present(unets, kind="i2v"):
+        return True
+    if _comfy_wan_disk_ready(kind="t2v") and not _wan_noise_pair_present(unets, kind="t2v"):
+        return True
+    return False
+
+
 def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]) -> dict[str, Any]:
     gpu_info = agent.get_gpu_info()
     refresh_disk_guard(agent_state)
@@ -891,6 +915,33 @@ def _has_lens_text_encoder(assets: list[str]) -> bool:
     return False
 
 
+def _comfy_wan_disk_ready(*, kind: str = "i2v") -> bool:
+    """Disk truth for Comfy Wan — never claim-ready on empty/corrupt weights.
+
+    Inventory alone can lag or lie after a false provision-complete; require real
+    high+low noise files (Wan2.2/ or top-level aliases) with a sane min size.
+    """
+    root = _find_comfy_models_root()
+    if root is None:
+        return False
+    dm = root / "diffusion_models"
+    prefix = "wan2.2_i2v" if kind == "i2v" else "wan2.2_t2v"
+    high = f"{prefix}_high_noise_14B_fp8_scaled.safetensors"
+    low = f"{prefix}_low_noise_14B_fp8_scaled.safetensors"
+    min_bytes = 1_000_000_000
+
+    def _ok(name: str) -> bool:
+        for candidate in (dm / "Wan2.2" / name, dm / name):
+            try:
+                if candidate.is_file() and candidate.stat().st_size >= min_bytes:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    return _ok(high) and _ok(low)
+
+
 def _wan_noise_pair_present(names: list[str], *, kind: str) -> bool:
     """True only when both high-noise and low-noise UNETs for kind (i2v/t2v) are listed.
 
@@ -915,10 +966,14 @@ def _wan_noise_pair_present(names: list[str], *, kind: str) -> bool:
 
 
 def _has_wan_i2v(models: dict) -> bool:
+    if not _comfy_wan_disk_ready(kind="i2v"):
+        return False
     return _wan_noise_pair_present(list(models.get("unets") or []), kind="i2v")
 
 
 def _has_wan_t2v(models: dict) -> bool:
+    if not _comfy_wan_disk_ready(kind="t2v"):
+        return False
     return _wan_noise_pair_present(list(models.get("unets") or []), kind="t2v")
 
 
