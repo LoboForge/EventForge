@@ -34,6 +34,23 @@ export LOBO_SECRET LOBO_INSTANCE_ID HF_TOKEN HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
 PY="${PY:-/venv/main/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
+# Durable hf-hub pin BEFORE any pip install — transformers 4.x needs hf-hub<1.0; the
+# native LTX runner + Wan/diffusers deps otherwise silently upgrade it to 1.x and break
+# every job. Skipped for transformers 5.x. Persisted below so the cron watchdog (which
+# only sources .loboforge-env) inherits it on every reconnect.
+if [[ -z "${PIP_CONSTRAINT:-}" ]] && ! "$PY" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+  echo 'huggingface_hub>=0.34.0,<1.0' > /workspace/pip-constraints.txt
+  export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+fi
+if [[ -n "${PIP_CONSTRAINT:-}" ]]; then
+  touch /workspace/.loboforge-env
+  if grep -q '^export PIP_CONSTRAINT=' /workspace/.loboforge-env 2>/dev/null; then
+    sed -i "s|^export PIP_CONSTRAINT=.*|export PIP_CONSTRAINT=\"${PIP_CONSTRAINT}\"|" /workspace/.loboforge-env
+  else
+    echo "export PIP_CONSTRAINT=\"${PIP_CONSTRAINT}\"" >> /workspace/.loboforge-env
+  fi
+fi
+
 # CUDA forward-compat fix: vast comfy images ship /usr/local/cuda*/compat/libcuda.so
 # built for a newer driver (e.g. 575). Consumer GPUs (RTX 3090/4090) do NOT support
 # forward compatibility and torch fails with "Error 804: forward compatibility was
@@ -100,7 +117,12 @@ PY
 "$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" 2>/dev/null || true
 
 BASE="${LOBO_BASE_URL:-https://www.loboforge.com}"
+# LOBO_BASE_URL must be the LoboForge hub (active-loras / hub auth), NEVER EventForge.
+case "$(printf '%s' "$BASE" | tr '[:upper:]' '[:lower:]')" in
+  *eventforge.loboforge.com*) BASE="https://www.loboforge.com" ;;
+esac
 BASE="${BASE%/}"
+export LOBO_BASE_URL="$BASE"
 
 # Always refresh worker package — stale trees from failed onstart runs break native provision.
 rm -rf /workspace/loboforge_worker

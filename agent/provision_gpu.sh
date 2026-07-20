@@ -208,6 +208,11 @@ print(f'{m.group(1)}|{m.group(3)}' if m else '')
 # the explicit LOBO_INSTANCE_ID then fall back. status_post() is silent on
 # success and only echoes a warn on transport failure.
 LOBO_BASE_URL="${LOBO_BASE_URL:-https://www.loboforge.com}"
+# LOBO_BASE_URL must be the LoboForge hub (active-loras / hub auth), NEVER EventForge.
+case "$(printf '%s' "$LOBO_BASE_URL" | tr '[:upper:]' '[:lower:]')" in
+  *eventforge.loboforge.com*) LOBO_BASE_URL="https://www.loboforge.com" ;;
+esac
+LOBO_BASE_URL="${LOBO_BASE_URL%/}"
 LOBO_INSTANCE_ID="${LOBO_INSTANCE_ID:-${CONTAINER_ID:-${VAST_CONTAINERLABEL:-unknown}}}"
 
 status_post() {
@@ -888,6 +893,17 @@ resolve_forge_queue_capabilities() {
 resolve_forge_queue_capabilities "$MODE"
 export LOBO_MODE="$MODE"
 
+# Durable hf-hub pin BEFORE any pip install — transformers 4.x needs hf-hub<1.0;
+# later job-time pip installs otherwise upgrade it to 1.x and break every job.
+# Skipped for transformers 5.x. Persisted into .loboforge-env by lobo_write_persisted_env.
+if [[ -z "${PIP_CONSTRAINT:-}" ]]; then
+    resolve_pybin
+    if ! "$PYBIN" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+        echo 'huggingface_hub>=0.34.0,<1.0' > /workspace/pip-constraints.txt 2>/dev/null || true
+        [[ -f /workspace/pip-constraints.txt ]] && export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+    fi
+fi
+
 assert_gpu_compatible
 
 required_container_gb() {
@@ -1506,6 +1522,23 @@ info "Pulling active LoRAs from LoboForge (mode=$MODE)..."
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 start_heartbeat "loras.pull"
 pull_active_loras_from_api "loras.pull" || warn "Final LoRA pull had errors."
+# ComfyUI only indexes LoRAs under models/loras/. Any *.safetensors that a sync
+# dropped in the models/ root would be invisible and permanently block LoRA-gated
+# jobs (e.g. flux-klein-edit) — relocate them into models/loras/.
+if [[ -n "${MODELS:-}" && -d "$MODELS" ]]; then
+    mkdir -p "$MODELS/loras"
+    shopt -s nullglob
+    _reloc=0
+    for _stray in "$MODELS"/*.safetensors; do
+        [[ -f "$_stray" ]] || continue
+        mv -f "$_stray" "$MODELS/loras/" 2>/dev/null && _reloc=$((_reloc + 1))
+    done
+    shopt -u nullglob
+    if (( _reloc > 0 )); then
+        warn "Relocated $_reloc stray LoRA(s) from models/ root into models/loras/"
+        status_post "loras.reconcile" "ok" "moved $_reloc stray safetensors to models/loras/"
+    fi
+fi
 stop_heartbeat
 
 # =============================================================================

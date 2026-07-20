@@ -8,8 +8,18 @@ cd /workspace
 [[ -f /workspace/.loboforge-env ]] && set -a && . /workspace/.loboforge-env && set +a
 
 BASE="${LOBO_BASE_URL:-https://www.loboforge.com}"
+case "$(printf '%s' "$BASE" | tr '[:upper:]' '[:lower:]')" in
+  *eventforge.loboforge.com*) BASE="https://www.loboforge.com" ;;
+esac
 BASE="${BASE%/}"
 LF_UA="LoboForge-Worker/1.1"
+
+# Durable hf-hub pin: the reconnect path below reinstalls the worker + native deps,
+# which otherwise re-upgrade huggingface_hub to 1.x and break the transformers 4.x
+# LTX runner (see provision_ltx_native.sh). Carry the persisted constraint file.
+if [[ -f /workspace/pip-constraints.txt ]]; then
+  export PIP_CONSTRAINT="${PIP_CONSTRAINT:-/workspace/pip-constraints.txt}"
+fi
 
 # Vast images often reboot without starting cron — heal that every run.
 if command -v service >/dev/null 2>&1; then

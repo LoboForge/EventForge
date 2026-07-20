@@ -47,7 +47,7 @@ Or read credentials in one shot (Cursor agents: `Read secrets.local.json`):
 |------|------------|------------------|-------------|-----------------|--------------------------|
 | `image` | `loboforge-image` | [agent/provision_worker.sh](../agent/provision_worker.sh) | 120 GB | 80 GB | `flux-klein,flux-klein-edit,zimage,chroma` |
 | `video` | `loboforge-video` | [agent/provision_worker.sh](../agent/provision_worker.sh) | 130 GB | 90 GB | `wan` (+ `ltx` if music/LTX enabled) |
-| `wan-native` | `loboforge-wan-native` | [agent/provision_wan_native.sh](../agent/provision_wan_native.sh) | 130 GB | 120 GB | `wan` |
+| `wan-native` | `loboforge-wan-native` | [agent/provision_wan_native.sh](../agent/provision_wan_native.sh) | 256 GB | 220 GB | `wan` |
 | `ltx-native` | `loboforge-ltx` | [agent/provision_ltx_native.sh](../agent/provision_ltx_native.sh) | 130 GB | 120 GB | `ltx` |
 | `music` | `loboforge-music` | [agent/provision_worker.sh](../agent/provision_worker.sh) | 80 GB | 50 GB | `wan` (ACE-Step rides wan queue) |
 | `all` / `both` | `loboforge-all` | [agent/provision_worker.sh](../agent/provision_worker.sh) | 150 GB | 120 GB | all Comfy caps |
@@ -152,7 +152,7 @@ curl -sf -X POST \
     "offerId": 40767214,
     "mode": "wan-native",
     "label": "loboforge-wan-native",
-    "diskGb": 130
+    "diskGb": 180
   }' | python3 -m json.tool
 ```
 
@@ -268,6 +268,23 @@ Hostname pattern: `loboforge-{mode}-{last8_of_instance_id}` (e.g. `loboforge-wan
 | `EF queue` → HTTP 403 | Ops middleware blocking `/health` | `/health` must stay public (prod bug — fix in EventForge deploy) |
 | Music stuck on `ltx` queue | Legacy capability routing | Deploy music→wan fix; remap runs on queue load |
 | Only 1 fleet row flashing | UI keyed by worker id | Deploy ops UI that keys by `node_uuid`/hostname |
+| **Every wan-native job fails: `huggingface-hub>=0.30.0,<1.0 is required ... found 1.24.0`** | Job-time `pip install` (peft/diffusers/Wan2.2 deps) upgrades hf-hub to 1.x. The cron watchdog + module agent only `source .loboforge-env`, which did **not** carry `PIP_CONSTRAINT` (cron doesn't inherit the onstart shell env). | Fixed in repo: `provision_wan_native.sh` now persists `PIP_CONSTRAINT` into `.loboforge-env`. Live box: `echo 'export PIP_CONSTRAINT=/workspace/pip-constraints.txt' >> /workspace/.loboforge-env; /venv/main/bin/pip install 'huggingface_hub>=0.34.0,<1.0'; restart agent tmux. |
+| **wan-native OOMs every job on 80GB A100** (`CUDA out of memory`, ~80.5/81 GB used) | `LOBO_UNLOAD_MODELS=0` (warm) keeps BOTH native bf16 A14B experts (28+28GB) + umt5 resident. Fits fp8/Comfy, NOT the native runner. Watchdog line 59 also hardcoded `unload=0` + `SKIP_COMFY=0`, clobbering `.loboforge-env` on every reconnect. | Fixed in repo: provision auto-selects `unload=1` (expert-swap) for VRAM<140GB + `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; watchdog now `SKIP_COMFY=1` and respects persisted `unload`. `WorkerBootstrapDefaults.cs` no longer forces `unload=0`. |
+| **Manually-rented wan-native boxes vanish within ~1h; wrong-GPU replacements appear** | `archon-fleet-monitor` (`/media/wrath/AI/archon-fleet-monitor`, `run-fleet-watcher.sh` every 120s) treats `wan-native` as a **singleton** and remediates "not-contributing" boxes; a second cursor-agent-worker also rents on the same Vast account. Net effect: A100 80GB rentals get churned and replaced with RTX 5090/3090 (too small for native A14B). | **Not a provisioning-script bug.** Resolve the competing controller: pause `run-fleet-watcher.sh`, or set `fleet.json` wan-native `min_running`/`singleton` + pin the desired A100 IDs in `pinned_roles`, before renting 80GB boxes. |
+| **Image LoRA never indexed; `flux-klein-edit` (or any LoRA-gated) jobs stuck forever** | A LoRA sync from LoboForge dropped the `*.safetensors` at the Comfy `models/` root (or a non-loras subdir, e.g. `klein-deepthroat` under `models/`). ComfyUI only indexes LoRAs under `models/loras/`, so the dispatcher's LoRA gate can never be satisfied. | Fixed in repo: `provision_gpu.sh` + `provision_worker.sh` now relocate any stray root `*.safetensors` into `models/loras/` after every sync (`lobo_reconcile_comfy_loras` in `worker-bootstrap-env.sh`). Live box: `mkdir -p $COMFY/models/loras && mv $COMFY/models/*.safetensors $COMFY/models/loras/` then restart the agent/Comfy so it re-indexes. |
+| **hf-hub 1.x breaks jobs on image/video/ltx boxes too** (`huggingface-hub>=0.30.0,<1.0 is required ... found 1.24.0`) | The `PIP_CONSTRAINT` hf-hub pin previously shipped only in `provision_wan_native.sh`. `provision_worker.sh` / `provision_ltx_native.sh` / `provision_gpu.sh` had no pin, and `lobo_write_persisted_env` did not carry `PIP_CONSTRAINT` into `.loboforge-env`. | Fixed in repo: all provision scripts now write `/workspace/pip-constraints.txt` + export `PIP_CONSTRAINT` before any pip install (skipped on transformers 5.x), and `worker-bootstrap-env.sh:lobo_write_persisted_env` persists `PIP_CONSTRAINT` so cron/watchdog launchers inherit it. |
+| **Box pulls active-loras from the wrong host / gets zero customer LoRAs** | `LOBO_BASE_URL` was set to `eventforge.loboforge.com`. Active-loras + hub auth live on the LoboForge hub only. | Fixed in repo: every provision script + both watchdogs coerce `LOBO_BASE_URL` away from EventForge to `https://www.loboforge.com` (`lobo_normalize_base_url`); `lobo_write_persisted_env` already coerces the persisted value. |
+
+### Incident 2026-07-18 — wan-native 80GB churn + config bugs
+
+Two manually-rented A100 80GB boxes (45265221, 45265222) plus two earlier ones (45262021, 45262028) kept vanishing. Findings:
+
+1. **Root cause of "always problems" is NOT the script** — a competing controller (`archon-fleet-monitor` + a second cursor-agent-worker in that repo) churns the wan-native fleet on the shared Vast account and rents undersized GPUs (RTX 5090/3090). Manually-rented 80GB boxes get replaced.
+2. **hf-hub 1.x re-upgrade** broke every job — the pin lived in the onstart/provision shell but the cron watchdog + module agent only read `.loboforge-env`, which lacked `PIP_CONSTRAINT`.
+3. **unload=0 OOM** — native bf16 A14B can't run warm on 80GB; needs expert-swap. The watchdog reconnect path also reset `SKIP_COMFY=0` (breaking native mode / claim-ready) and `unload=0`.
+4. **Proof the script works**: once patched live, box 45265221 reached `claim_ready=wan`, ack'd 32 LoRAs, and actively claimed wan jobs. Only the 2 config bugs (now fixed durably) + a stuck-CUDA-context zombie (from force-killing an agent mid-job — drain VRAM with `fuser -k /dev/nvidia*` on restart) blocked completion.
+
+Repo fixes shipped: `agent/provision_wan_native.sh`, `agent/wan-agent-watchdog.sh`, `Infrastructure/WorkerBootstrapDefaults.cs`. **Deploy required** for prod-served `/agent/*` scripts to take effect on new/rebooted boxes.
 
 ### Manual recovery (wan-native / video box)
 

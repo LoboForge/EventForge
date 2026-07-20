@@ -10,7 +10,14 @@ public static class VastAiDiskRequirements
     public static int RecommendedRentDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 130,
-        "wan-native" => 150,
+        // wan-native runs the native Wan-Video/Wan2.2 runner (LOBO_SKIP_COMFY=1 — NO ComfyUI).
+        // Its claim-ready gate (i2v_ready) requires the full Wan-AI/Wan2.2-I2V-A14B checkpoint:
+        // high_noise_model 57GB + low_noise_model 57GB + umt5-xxl T5 11.4GB + VAE 0.5GB = ~126GB,
+        // plus the Wan2.2 git repo + pip venv (~12GB), 2 lightning LoRAs (~1.5GB), hf download
+        // staging, and video-output temp during jobs. A 170GB box (incident 2026-07-18, inst
+        // 45255378) filled up mid-download and never became claim-ready; healthy reference box
+        // (45013488) sits at ~23GB free on 200GB. Size to 256GB for comfortable headroom.
+        "wan-native" => 256,
         "video" => 130,
         "music" => 80,
         "all"   => 150,
@@ -28,7 +35,9 @@ public static class VastAiDiskRequirements
     public static int MinimumRentDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 100,
-        "wan-native" => 120,
+        // Must exceed the full native+fp8 wan footprint (~200GB observed on healthy boxes).
+        // Renting below this silently produces a box that never reaches claim_ready.
+        "wan-native" => 220,
         "video" => 80,
         "music" => 50,
         "all"   => 120,
@@ -39,7 +48,7 @@ public static class VastAiDiskRequirements
     public static int MinimumHostDiskGb(string? mode) => NormalizeMode(mode) switch
     {
         "ltx-native" => 120,
-        "wan-native" => 120,
+        "wan-native" => 220,
         "video" => 90,
         "music" => 50,
         "all"   => 120,

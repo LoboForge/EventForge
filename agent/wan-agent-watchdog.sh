@@ -31,6 +31,15 @@ WAN_ROOT="${WAN_MODEL_ROOT:-/workspace/wan-models}"
 PY="${PY:-/venv/main/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 export PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"
+
+# Durable hf-hub pin: the heal/reconnect path below reinstalls agent + Wan deps, which otherwise
+# re-upgrade huggingface_hub to 1.x and break the native Wan runner (see provision_wan_native.sh).
+if [[ -f /workspace/pip-constraints.txt ]]; then
+  export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+elif ! "$PY" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+  echo 'huggingface_hub>=0.34.0,<1.0' > /workspace/pip-constraints.txt
+  export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+fi
 if ! "$PY" -c "from loboforge_worker.inference.wan.paths import i2v_ready, load_layout, wan_model_root; r=wan_model_root(); exit(0 if (load_layout(r) and i2v_ready(r)) else 1)" 2>/dev/null; then
   echo "[$(date -Is)] watchdog: native Wan models not ready (layout/i2v) — skip agent launch" >> /workspace/wan-watchdog.log
   exit 0
@@ -47,7 +56,15 @@ fi
 
 echo "[$(date -Is)] watchdog: agent tmux missing — reconnecting" >> /workspace/wan-watchdog.log
 
-export LOBO_EXECUTOR=native LOBO_SKIP_COMFY=0 LOBO_WAN=1 LOBO_LTX23=0 LOBO_MUSIC=0 LOBO_UNLOAD_MODELS=0
+# Native mode MUST keep SKIP_COMFY=1 (the native bf16 Wan runner has no ComfyUI);
+# SKIP_COMFY=0 here previously flipped the agent into Comfy model checks and it
+# never became claim_ready=wan. Do NOT hardcode LOBO_UNLOAD_MODELS=0 either: this
+# runs AFTER sourcing .loboforge-env and would clobber the expert-swap setting,
+# re-introducing the both-experts-warm OOM on 80GB. Respect the persisted value
+# (default 1 = expert-swap) and carry the alloc-conf fragmentation fix.
+export LOBO_EXECUTOR=native LOBO_SKIP_COMFY=1 LOBO_WAN=1 LOBO_LTX23=0 LOBO_MUSIC=0
+export LOBO_UNLOAD_MODELS="${LOBO_UNLOAD_MODELS:-1}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export MODE=wan-native LOBO_MODE=wan-native
 export WAN_MODEL_ROOT="$WAN_ROOT" WAN_REPO="${WAN_REPO:-/workspace/Wan2.2}"
 export LOBO_LABEL="${LOBO_LABEL:-loboforge-wan-native}"

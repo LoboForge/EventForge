@@ -25,6 +25,11 @@ MODE="${MODE:-ollama}"
 LOBO_SECRET="${LOBO_SECRET:-change-me-in-admin}"
 LOBO_SERVER="${LOBO_SERVER:-wss://www.loboforge.com}"
 LOBO_BASE_URL="${LOBO_BASE_URL:-https://www.loboforge.com}"
+# LOBO_BASE_URL must be the LoboForge hub (active-loras / hub auth), NEVER EventForge.
+case "$(printf '%s' "$LOBO_BASE_URL" | tr '[:upper:]' '[:lower:]')" in
+  *eventforge.loboforge.com*) LOBO_BASE_URL="https://www.loboforge.com" ;;
+esac
+LOBO_BASE_URL="${LOBO_BASE_URL%/}"
 LOBO_INSTANCE_ID="${LOBO_INSTANCE_ID:-${CONTAINER_ID:-unknown}}"
 LOBO_LABEL="${LOBO_LABEL:-loboforge-ollama}"
 LOBO_OLLAMA_MODEL="${LOBO_OLLAMA_MODEL:-dolphin3:8b}"

@@ -22,6 +22,11 @@ if [[ -z "${LOBO_SECRET:-}" || "${LOBO_SECRET}" == "change-me-in-admin" ]]; then
 fi
 LOBO_SERVER="${LOBO_SERVER:-wss://www.loboforge.com}"
 LOBO_BASE_URL="${LOBO_BASE_URL:-https://www.loboforge.com}"
+# LOBO_BASE_URL must be the LoboForge hub (active-loras / hub auth), NEVER EventForge.
+case "$(printf '%s' "$LOBO_BASE_URL" | tr '[:upper:]' '[:lower:]')" in
+  *eventforge.loboforge.com*) LOBO_BASE_URL="https://www.loboforge.com" ;;
+esac
+LOBO_BASE_URL="${LOBO_BASE_URL%/}"
 LOBO_SCRIPT_FALLBACK="${LOBO_SCRIPT_FALLBACK:-https://www.loboforge.com}"
 LOBO_INSTANCE_ID="${LOBO_INSTANCE_ID:-${CONTAINER_ID:-unknown}}"
 
@@ -110,6 +115,15 @@ unset _gen_queue
 PY="/venv/main/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
+# Durable hf-hub pin BEFORE any pip install — transformers 4.x needs hf-hub<1.0, and
+# later job-time pip installs otherwise upgrade it to 1.x and break every job. Skipped
+# for transformers 5.x (needs hf-hub 1.x). Persisted into .loboforge-env below so cron /
+# watchdog launchers inherit it. See worker-bootstrap-env.sh:lobo_ensure_hf_hub_pin.
+if [[ -z "${PIP_CONSTRAINT:-}" ]] && ! "$PY" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+  echo 'huggingface_hub>=0.34.0,<1.0' > /workspace/pip-constraints.txt
+  export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+fi
+
 # Agent imports need these before bootstrap touches loboforge_agent.py.
 "$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" boto3 2>/dev/null || true
 
@@ -158,8 +172,11 @@ case "$_norm_mode" in
 esac
 nohup bash -lc "
   source /workspace/.loboforge-env 2>/dev/null || true
+  [[ -f /workspace/worker-bootstrap-env.sh ]] && . /workspace/worker-bootstrap-env.sh 2>/dev/null || true
   export PYTHONPATH=/workspace
   $PY -m loboforge_worker sync-loras --base-url \"$LOBO_BASE_URL\" --secret \"$LOBO_SECRET\" --mode \"$_lora_mode\"
+  # Comfy only indexes loras under models/loras/ — move any that landed in models/ root.
+  type lobo_reconcile_comfy_loras &>/dev/null && lobo_reconcile_comfy_loras || true
 " >> /workspace/lora-sync.log 2>&1 &
 
 # Model downloads: tmux session loboforge-provision (started by bootstrap)

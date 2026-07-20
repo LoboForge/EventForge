@@ -89,12 +89,16 @@ lobo_apply_wan_vram_env() {
   local gb="${1:-0}"
   export WAN_VRAM_GB="$gb"
   if [[ -z "${LOBO_UNLOAD_MODELS:-}" ]]; then
-    if [[ "$gb" -eq 0 || "$gb" -lt 48 ]]; then
-      export LOBO_UNLOAD_MODELS=1
-      export WAN_LOW_VRAM=1
-    else
+    # The native bf16 A14B stack (high 28GB + low 28GB + umt5 + activations) does NOT
+    # fit warm even on an 80GB A100 — it OOMs every job. Only skip expert-swap when the
+    # card is big enough for the whole warm stack (>=140GB, effectively never on one GPU).
+    # This matches the active durable-env selection below; 48GB was wrong (warm OOM).
+    if [[ "$gb" -ge 140 ]]; then
       export LOBO_UNLOAD_MODELS=0
       export WAN_LOW_VRAM=0
+    else
+      export LOBO_UNLOAD_MODELS=1
+      export WAN_LOW_VRAM=1
     fi
   fi
   echo "wan-vram: ${gb}GB unload_models=${LOBO_UNLOAD_MODELS:-?} low_vram=${WAN_LOW_VRAM:-?}" | tee -a /workspace/provision.log
@@ -176,6 +180,53 @@ if [[ -f /workspace/worker-bootstrap-env.sh ]]; then
     lobo_write_persisted_env /workspace/.loboforge-env
   fi
 fi
+
+# ---------------------------------------------------------------------------
+# Durable critical env (incident 2026-07-18, inst 45265221 / 45265222).
+# The long-running agent is (re)started by the cron watchdog and by the
+# loboforge_worker module -- NOT by this provision shell, and cron does NOT
+# inherit this shell's environment. Those launchers ONLY `source
+# /workspace/.loboforge-env`, but lobo_write_persisted_env persists just a
+# whitelist and DROPS the three vars below. Without them:
+#   1. PIP_CONSTRAINT missing -> job-time `pip install` (peft/diffusers/Wan2.2
+#      deps) silently upgrades huggingface_hub to 1.x, and the transformers 4.x
+#      native runner then fails EVERY job with
+#      "huggingface-hub>=0.30.0,<1.0 is required ... found 1.24.0".
+#   2. PYTORCH_CUDA_ALLOC_CONF missing -> VRAM fragments and the runner OOMs.
+#   3. LOBO_UNLOAD_MODELS=0 (warm) is fatal for the NATIVE bf16 A14B stack:
+#      high 28GB + low 28GB + umt5 ~11GB + VAE + activations keeps BOTH experts
+#      resident (~80GB) and OOMs on every job even on an 80GB A100 (observed
+#      80843/81153 MiB used). The fp8/Comfy pipeline can run warm on 80GB; the
+#      native runner cannot -- it needs expert-swap (unload=1). Only skip swap on
+#      a card big enough for the whole warm stack (>=140GB, i.e. effectively
+#      never on one GPU). Set LOBO_UNLOAD_MODELS explicitly to override.
+# Append idempotently so EVERY launcher (cron, module, manual) gets them.
+# ---------------------------------------------------------------------------
+lobo_persist_env_kv() {
+  local key="$1" val="$2" file="/workspace/.loboforge-env"
+  touch "$file"
+  if grep -q "^export ${key}=" "$file" 2>/dev/null; then
+    sed -i "s|^export ${key}=.*|export ${key}=\"${val}\"|" "$file"
+  else
+    echo "export ${key}=\"${val}\"" >> "$file"
+  fi
+}
+if [[ -z "${PIP_CONSTRAINT:-}" ]] && ! "$PY" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+  echo 'huggingface_hub>=0.34.0,<1.0' > /workspace/pip-constraints.txt
+  export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
+fi
+[[ -n "${PIP_CONSTRAINT:-}" ]] && lobo_persist_env_kv PIP_CONSTRAINT "${PIP_CONSTRAINT}"
+lobo_persist_env_kv PYTORCH_CUDA_ALLOC_CONF "${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+wan_vram_gb="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{print int(($1+512)/1024)}')"
+if [[ -n "${LOBO_UNLOAD_MODELS:-}" && "${LOBO_UNLOAD_MODELS}" != "0" ]]; then
+  wan_unload="${LOBO_UNLOAD_MODELS}"
+elif [[ -n "${wan_vram_gb:-}" && "${wan_vram_gb}" -ge 140 ]]; then
+  wan_unload=0
+else
+  wan_unload=1
+fi
+lobo_persist_env_kv LOBO_UNLOAD_MODELS "${wan_unload}"
+echo "durable-env: unload=${wan_unload} vram=${wan_vram_gb:-?}GB alloc=expandable_segments pip_constraint=${PIP_CONSTRAINT:-none}" | tee -a /workspace/provision.log
 
 cuda_ok() { "$PY" -c 'import torch,sys; sys.exit(0 if (torch.cuda.is_available() and (torch.zeros(1,device="cuda")+1).item()==1.0) else 1)' >/dev/null 2>&1; }
 if ! cuda_ok; then

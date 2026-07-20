@@ -191,6 +191,68 @@ lobo_iot_certs_present() {
   return 1
 }
 
+# LOBO_BASE_URL must point at the LoboForge hub (active-loras, hub auth), NEVER
+# EventForge. A box that resolves LOBO_BASE_URL to eventforge.loboforge.com pulls
+# active-loras from the wrong host and never gets its customer LoRAs. Coerce here
+# and echo the normalized value.
+lobo_normalize_base_url() {
+  local url="${1:-${LOBO_BASE_URL:-https://www.loboforge.com}}"
+  case "$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')" in
+    ""|*eventforge.loboforge.com*) url="https://www.loboforge.com" ;;
+  esac
+  printf '%s' "${url%/}"
+}
+
+# Durable hf-hub pin. transformers 4.x REQUIRES huggingface_hub<1.0, but job-time
+# `pip install` (peft/diffusers/Wan2.2/agent deps) silently upgrades hf-hub to 1.x
+# and then EVERY transformers/native job fails with
+# "huggingface-hub>=0.30.0,<1.0 is required ... found 1.24.0". Write a PIP_CONSTRAINT
+# file and export it so all pip installs in this process tree (and every launcher
+# that sources .loboforge-env) are blocked from installing hf-hub 1.x. Skipped only
+# when transformers 5.x is present (which needs hf-hub 1.x). Idempotent.
+lobo_ensure_hf_hub_pin() {
+  local py="${1:-/venv/main/bin/python3}"
+  [[ -x "$py" ]] || py="$(command -v python3)"
+  if "$py" -c 'import transformers,sys; sys.exit(0 if int(transformers.__version__.split(".")[0])>=5 else 1)' 2>/dev/null; then
+    return 0
+  fi
+  local cf="${PIP_CONSTRAINT:-/workspace/pip-constraints.txt}"
+  mkdir -p "$(dirname "$cf")" 2>/dev/null || true
+  echo 'huggingface_hub>=0.34.0,<1.0' > "$cf" 2>/dev/null || return 0
+  export PIP_CONSTRAINT="$cf"
+}
+
+# Move any *.safetensors that landed in the Comfy models/ ROOT into models/loras/.
+# LoRA syncs from LoboForge (active-loras / sync-loras) sometimes drop a LoRA at the
+# models root or under a non-loras subdir; ComfyUI never indexes those as loras, so
+# the dispatcher's LoRA gate blocks every job needing them forever (e.g. a
+# klein-deepthroat LoRA under models/ root permanently breaks flux-klein-edit).
+# Best-effort + idempotent: safe to call after every sync.
+lobo_reconcile_comfy_loras() {
+  local models="${1:-${MODELS:-}}"
+  if [[ -z "$models" ]]; then
+    local cand
+    for cand in "${COMFYUI_DIR:-}/models" "${COMFY_DIR:-}/models" \
+                /opt/workspace-internal/ComfyUI/models /opt/workspace-internal/comfyui/models \
+                /workspace/comfyui/models /workspace/ComfyUI/models /opt/ComfyUI/models; do
+      [[ -n "$cand" && -d "$cand" ]] && { models="$cand"; break; }
+    done
+  fi
+  [[ -n "$models" && -d "$models" ]] || return 0
+  mkdir -p "$models/loras" 2>/dev/null || true
+  local f moved=0
+  shopt -s nullglob
+  for f in "$models"/*.safetensors; do
+    [[ -f "$f" ]] || continue
+    mv -f "$f" "$models/loras/" 2>/dev/null && moved=$((moved + 1))
+  done
+  shopt -u nullglob
+  if [[ "$moved" -gt 0 ]]; then
+    echo "lora-reconcile: moved $moved stray LoRA(s) from ${models}/ root to ${models}/loras/"
+  fi
+  return 0
+}
+
 # Persist forge-queue IAM + SQS settings for agent restarts / heal / reboot.
 # Vast extra_env is not always visible to tmux children — .loboforge-env is the source of truth.
 lobo_write_persisted_env() {
@@ -220,6 +282,7 @@ keys = {
     "FORGE_QUEUE_BUCKET": os.environ.get("FORGE_QUEUE_BUCKET", ""),
     "FORGE_QUEUE_PREFIX": os.environ.get("FORGE_QUEUE_PREFIX", "fq"),
     "FORGE_QUEUE_CAPABILITY": os.environ.get("FORGE_QUEUE_CAPABILITY", ""),
+    "PIP_CONSTRAINT": os.environ.get("PIP_CONSTRAINT", ""),
     "EVENT_FORGE_URL": os.environ.get("EVENT_FORGE_URL", ""),
     "EVENT_FORGE_WORKER_KEY": os.environ.get("EVENT_FORGE_WORKER_KEY", ""),
     "AWS_ACCESS_KEY_ID": ak,

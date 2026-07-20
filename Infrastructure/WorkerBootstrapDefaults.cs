@@ -152,7 +152,12 @@ public static class WorkerBootstrapDefaults
         }
         else if (nativeWan)
         {
-            sb.Append(" LOBO_EXECUTOR=native LOBO_SKIP_COMFY=1 LOBO_WAN=1 LOBO_LTX23=0 LOBO_MUSIC=0 LOBO_UNLOAD_MODELS=0");
+            // Do NOT force LOBO_UNLOAD_MODELS=0 here: the native bf16 Wan2.2-A14B stack
+            // (high 28GB + low 28GB + umt5 + activations) does not fit warm even on an
+            // 80GB A100 and OOMs every job. Leave it unset so provision_wan_native.sh
+            // auto-selects expert-swap (unload=1) unless VRAM >= ~140GB. Carry the
+            // alloc-conf fragmentation fix that the native runner needs.
+            sb.Append(" LOBO_EXECUTOR=native LOBO_SKIP_COMFY=1 LOBO_WAN=1 LOBO_LTX23=0 LOBO_MUSIC=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True");
             sb.Append(" MODE=wan-native LOBO_MODE=wan-native WAN_MODEL_ROOT=/workspace/wan-models WAN_REPO=/workspace/Wan2.2");
             sb.Append(" bash -c ").Append(BashQuote($"{agentCurl} | bash"));
         }
