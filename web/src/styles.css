@@ -258,6 +258,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .badge.job-status.leased, .badge.job-status.streaming { background: #18304a; color: #7eb8ff; }
 .badge.job-status.completed { background: #183824; color: #9be7b0; }
 .badge.job-status.failed { background: #3a1a1a; color: #ff9a9a; }
+.badge.queue-tier { text-transform: lowercase; font-variant-numeric: tabular-nums; }
+.badge.queue-tier.admin { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
+.badge.queue-tier.vip { background: rgba(251, 191, 36, 0.16); color: #fde68a; }
+.badge.queue-tier.normal { background: rgba(96, 165, 250, 0.16); color: #93c5fd; }
+.badge.queue-tier.bulk { background: rgba(148, 163, 184, 0.16); color: #cbd5e1; }
 .error.inline { display: inline; background: none; border: none; padding: 0; margin-left: 8px; font-size: .8rem; }
 .muted-foot { font-size: .88rem; }
 .actions-cell { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }

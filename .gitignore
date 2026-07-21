@@ -2,7 +2,8 @@
 **/obj/
 **/node_modules/
 **/__pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 *.db
 artifacts/
 publish-test/
@@ -10,6 +11,28 @@ ef-local.log
 secrets.local.json
 web/tsconfig.tsbuildinfo
 wwwroot/assets/
+web/node_modules/
+
+# Local scratch / never commit model weights (EventForge asset library / S3 only)
 .tmp-loras/
+.tmp/
 *.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+*.gguf
+*.ggml
+*.engine
+*.npz
+# Keep intentional small text/config; block common weight/media dumps
+*.mp4
+*.webm
+*.wav
+*.flac
+*.zip
+*.7z
+*.rar
 agent/*.tar.gz.bak.*
+*.bak.*

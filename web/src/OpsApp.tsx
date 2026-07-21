@@ -44,6 +44,12 @@ function isOrphanLease(job: JobRow, workers: WorkerRow[]): boolean {
   return !!active && active !== job.job_id
 }
 
+/** Priority lane badge for admin / vip / normal / bulk. */
+function QueueTierBadge({ tier }: { tier?: string | null }) {
+  const t = (tier || 'bulk').trim().toLowerCase() || 'bulk'
+  return <span className={`badge queue-tier ${t}`} title={`Queue: ${t}`}>{t}</span>
+}
+
 function Login({ onLogin }: { onLogin: () => void }) {
   const [key, setKey] = useState(getOpsKey())
   const [err, setErr] = useState<string | null>(null)
@@ -307,6 +313,15 @@ function QueueTab({
     { id: 'job', header: 'Job', sortValue: (r) => r.job_id, render: (r) => <code title={r.job_id}>{r.job_id.slice(0, 8)}</code> },
     { id: 'app', header: 'App', sortValue: (r) => r.app_id ?? '', render: (r) => <code title={r.app_id}>{r.app_id ?? '—'}</code> },
     { id: 'capability', header: 'Capability', sortValue: (r) => r.capability, render: (r) => r.capability },
+    {
+      id: 'tier',
+      header: 'Queue',
+      sortValue: (r) => {
+        const t = (r.tier || '').toLowerCase()
+        return t === 'admin' ? 4 : t === 'vip' ? 3 : t === 'normal' ? 2 : t === 'bulk' ? 1 : 0
+      },
+      render: (r) => <QueueTierBadge tier={r.tier} />,
+    },
     { id: 'prompt', header: 'Prompt', sortable: false, render: (r) => <PromptText prompt={r.prompt} /> },
     { id: 'worker', header: 'Worker', sortValue: (r) => r.hostname ?? r.worker_id ?? '', render: (r) => r.hostname ?? r.worker_id ?? '—' },
     {
@@ -337,7 +352,10 @@ function QueueTab({
     { id: 'job', header: 'Job', sortValue: (r) => r.job_id, render: (r) => <code title={r.job_id}>{r.job_id.slice(0, 8)}</code> },
     { id: 'app', header: 'App', sortValue: (r) => r.app_id ?? '', render: (r) => <code title={r.app_id}>{r.app_id ?? '—'}</code> },
     { id: 'capability', header: 'Capability', sortValue: (r) => r.capability, render: (r) => r.capability },
-    { id: 'tier', header: 'Tier', sortValue: (r) => r.tier, render: (r) => r.tier },
+    { id: 'tier', header: 'Queue', sortValue: (r) => {
+      const t = (r.tier || '').toLowerCase()
+      return t === 'admin' ? 4 : t === 'vip' ? 3 : t === 'normal' ? 2 : t === 'bulk' ? 1 : 0
+    }, render: (r) => <QueueTierBadge tier={r.tier} /> },
     { id: 'prompt', header: 'Prompt', sortable: false, render: (r) => <PromptText prompt={r.prompt} /> },
     { id: 'created', header: 'Created', sortValue: (r) => r.created_at ?? '', render: (r) => <span className="muted">{formatDateTime(r.created_at)}</span> },
     {
@@ -355,6 +373,15 @@ function QueueTab({
     { id: 'job', header: 'Job', sortValue: (r) => r.job_id, render: (r) => <code title={r.job_id}>{r.job_id.slice(0, 8)}</code> },
     { id: 'app', header: 'App', sortValue: (r) => r.app_id ?? '', render: (r) => <code title={r.app_id}>{r.app_id ?? '—'}</code> },
     { id: 'capability', header: 'Capability', sortValue: (r) => r.capability, render: (r) => r.capability },
+    {
+      id: 'tier',
+      header: 'Queue',
+      sortValue: (r) => {
+        const t = (r.tier || '').toLowerCase()
+        return t === 'admin' ? 4 : t === 'vip' ? 3 : t === 'normal' ? 2 : t === 'bulk' ? 1 : 0
+      },
+      render: (r) => <QueueTierBadge tier={r.tier} />,
+    },
     { id: 'prompt', header: 'Prompt', sortable: false, render: (r) => <PromptText prompt={r.prompt} /> },
     { id: 'output', header: 'Output', sortValue: (r) => r.output_kind ?? '', render: (r) => <span className="muted small">{r.output_kind ?? '—'}</span> },
     { id: 'completed', header: 'Completed', sortValue: (r) => r.completed_at ?? '', render: (r) => <span className="muted">{formatDateTime(r.completed_at)}</span> },

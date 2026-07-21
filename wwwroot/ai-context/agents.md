@@ -236,6 +236,7 @@ Full protocol: `docs/QueueIntegration.md`.
 5. **Never set prod `desiredCount=0`** — use `--force-new-deployment` with `--desired-count 1` to restart.
 6. Run `dotnet test event-forge.tests/EventForge.Tests.csproj` for backend changes; rebuild `event-forge/web` for UI.
 7. Do not commit secrets (`.env`, `appsettings.Secrets.json`, ops/worker keys).
+8. **Never commit model weights / LoRAs / large binaries** (`.safetensors`, checkpoints, dumps under `.tmp-loras/`). Publish LoRAs to the EventForge asset library / S3 (`POST /v1/assets/loras`); keep them out of git.
 
 ---
 
