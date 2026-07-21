@@ -110,6 +110,7 @@ export type Snapshot = {
   queue_by_app?: {
     app_id: string
     paused: boolean
+    random_bulk?: boolean
     queued: number
     in_progress: number
     failed: number
@@ -124,6 +125,7 @@ export type OpsAppRow = {
   paused: boolean
   pause_reason?: string | null
   paused_at?: string | null
+  random_bulk?: boolean
   jobs_queued: number
   jobs_in_progress: number
   jobs_failed: number

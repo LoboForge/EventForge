@@ -20,6 +20,7 @@ public static class ConsumerEndpoints
                 paused = apps.IsPaused(appId),
                 pause_reason = state?.PauseReason,
                 paused_at = state?.PausedAtUtc?.ToString("O"),
+                random_bulk = apps.IsRandomBulk(appId),
             });
         });
 

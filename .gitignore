@@ -1,6 +1,8 @@
 **/bin/
 **/obj/
 **/node_modules/
+**/__pycache__/
+*.pyc
 *.db
 artifacts/
 publish-test/
@@ -8,3 +10,6 @@ ef-local.log
 secrets.local.json
 web/tsconfig.tsbuildinfo
 wwwroot/assets/
+.tmp-loras/
+*.safetensors
+agent/*.tar.gz.bak.*

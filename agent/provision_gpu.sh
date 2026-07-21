@@ -120,8 +120,19 @@ MIN_CHECKPOINT=$((500 * 1024 * 1024))       # 500MB — ACE-Step ~3.5GB
 MIN_CHROMA=$((10 * 1024 * 1024 * 1024))         # 10GB — Chroma HD UNet
 
 
-# pull_active_loras_from_api — shared by early Klein sync + final pass
-# Best-effort; idempotent skips for files already on disk.
+# pull_active_loras_from_api — shared by early Klein sync + final pass.
+# Video/all sync is retried eagerly and then self-healed in the background if
+# still incomplete. It never blocks provision.complete: LoRAs do not gate wan
+# claim_ready (vanilla jobs must flow), and EventForge's per-job LoRA gate only
+# routes LoRA jobs to workers whose validated known_loras cover them.
+lora_sync_required() {
+    if [[ -n "${LOBO_REQUIRE_ACTIVE_LORAS:-}" ]]; then
+        [[ "${LOBO_REQUIRE_ACTIVE_LORAS}" == "1" ]]
+        return
+    fi
+    [[ "${MODE:-all}" == "video" || "${MODE:-all}" == "all" ]]
+}
+
 pull_active_loras_from_api() {
     local tag="${1:-loras.pull}"
     if [[ -z "${LOBO_SECRET:-}" ]]; then
@@ -137,6 +148,7 @@ pull_active_loras_from_api() {
     if [[ -z "$LORA_JSON" || "$LORA_JSON" == "[]" ]]; then
         warn "No active LoRAs from LoboForge ($tag)."
         status_post "$tag" "warn" "endpoint returned empty/unreachable; mode=$MODE"
+        lora_sync_required && return 1
         return 0
     fi
     local LORA_COUNT
@@ -191,7 +203,64 @@ print(f'{m.group(1)}|{m.group(3)}' if m else '')
                 ;;
         esac
     done
-    status_post "$tag" "ok" "active LoRAs pulled (mode=$MODE, count=$LORA_COUNT)"
+
+    # Verify every downloadable catalog entry after the pull. Size alone is not
+    # enough: a truncated safetensors file can exceed 1MB and still poison Comfy's
+    # inventory. Validate the header JSON and declared header length as well.
+    local LORA_MISSING
+    LORA_MISSING=$(LORA_JSON="$LORA_JSON" MODELS="$MODELS" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+rows = json.loads(os.environ.get("LORA_JSON") or "[]")
+root = Path(os.environ["MODELS"])
+bad = []
+
+def valid_safetensors(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        if size < 1_000_000:
+            return False
+        with path.open("rb") as fh:
+            raw = fh.read(8)
+            if len(raw) != 8:
+                return False
+            header_len = int.from_bytes(raw, "little")
+            if header_len <= 1 or header_len > min(64 * 1024 * 1024, size - 8):
+                return False
+            header = json.loads(fh.read(header_len))
+            return isinstance(header, dict)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict):
+        continue
+    file_path = str(row.get("file_path") or row.get("filePath") or "").strip()
+    source_url = str(row.get("source_url") or row.get("sourceUrl") or "").strip()
+    if not file_path or not source_url:
+        continue
+    rel = file_path.replace("\\", "/").lstrip("/")
+    if not rel.lower().startswith("loras/"):
+        rel = f"loras/{rel}"
+    dest = root / rel
+    if not valid_safetensors(dest):
+        bad.append(dest.name)
+
+print(",".join(sorted(set(bad), key=str.lower)))
+PY
+)
+    if [[ -n "$LORA_MISSING" ]]; then
+        local LORA_MISSING_COUNT
+        LORA_MISSING_COUNT=$(awk -F',' '{print NF}' <<< "$LORA_MISSING")
+        warn "Active LoRA verification failed for $LORA_MISSING_COUNT file(s): $LORA_MISSING"
+        status_post "$tag" "error" "active LoRA verification failed ($LORA_MISSING_COUNT): ${LORA_MISSING:0:800}"
+        return 1
+    fi
+
+    status_post "$tag" "ok" "active LoRAs pulled and verified (mode=$MODE, count=$LORA_COUNT)"
+    return 0
 }
 
 # ── Status reporting to LoboForge ─────────────────────────────────────────────
@@ -1511,17 +1580,47 @@ fi  # end WANT_MUSIC
 # box was provisioned BEFORE the LoRA was enabled. The endpoint returns
 # {file_path, source_url, base_model, wan_stage} per LoRA; we route by URL
 # shape: huggingface.co → hf CLI, drive.google.com → gdown, anything else →
-# curl. Skip silently when source_url is empty (admin-only direct-upload LoRA
-# with no remote copy yet — admin should populate SourceUrl via the S3 sidecar
-# or GDrive). Best-effort: a failure on a single LoRA logs + continues, so one
-# bad URL never blocks the whole box.
+# curl. Entries with no source URL remain job-scoped EventForge downloads.
+# Video/all boxes fail provisioning when any downloadable active LoRA is still
+# missing or corrupt after retries; they must never report provision.complete
+# and then sit claim-ready but unable to claim the queue.
 # =============================================================================
 echo ""
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 info "Pulling active LoRAs from LoboForge (mode=$MODE)..."
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 start_heartbeat "loras.pull"
-pull_active_loras_from_api "loras.pull" || warn "Final LoRA pull had errors."
+_lora_pull_ok=0
+for _lora_pull_attempt in 1 2 3; do
+    if pull_active_loras_from_api "loras.pull"; then
+        _lora_pull_ok=1
+        break
+    fi
+    if ! lora_sync_required; then
+        warn "Final LoRA pull had errors (non-required mode)."
+        _lora_pull_ok=1
+        break
+    fi
+    if (( _lora_pull_attempt < 3 )); then
+        warn "Active LoRA verification incomplete — self-heal retry $((_lora_pull_attempt + 1))/3 in 60s."
+        status_post "loras.retry" "warn" "retry $((_lora_pull_attempt + 1))/3 after verification failure"
+        sleep 60
+    fi
+done
+if (( ! _lora_pull_ok )); then
+    # Do NOT abort provisioning: LoRAs never gate wan claim_ready. The box can
+    # run vanilla (no-LoRA) jobs immediately, and EventForge's per-job LoRA gate
+    # will not hand it a LoRA job it cannot do. Keep self-healing in background.
+    warn "Active LoRA set still incomplete after 3 attempts — continuing (vanilla jobs OK); background self-heal every 5m."
+    status_post "loras.pull" "warn" "incomplete after 3 attempts; background self-heal active, vanilla jobs unaffected"
+    (
+        for _i in $(seq 1 48); do
+            sleep 300
+            pull_active_loras_from_api "loras.selfheal" && break
+        done
+    ) >> /workspace/lora-sync.log 2>&1 &
+fi
+unset _lora_pull_attempt _lora_pull_ok
 # ComfyUI only indexes LoRAs under models/loras/. Any *.safetensors that a sync
 # dropped in the models/ root would be invisible and permanently block LoRA-gated
 # jobs (e.g. flux-klein-edit) — relocate them into models/loras/.
@@ -1841,6 +1940,19 @@ if (( WANT_VIDEO )); then
     require_file "$MODELS/vae/wan_2.1_vae.safetensors" $MIN_VAE "Wan VAE"
     require_file "$MODELS/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors" $MIN_LIGHT_LORA "Wan lightning high LoRA"
     require_file "$MODELS/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors" $MIN_LIGHT_LORA "Wan lightning low LoRA"
+    # Comfy UNETLoader often lists top-level diffusion_models/; keep aliases in sync.
+    for _wan_alias in \
+        wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors \
+        wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors \
+        wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors \
+        wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors
+    do
+        _wan_src="$MODELS/diffusion_models/Wan2.2/$_wan_alias"
+        _wan_dst="$MODELS/diffusion_models/$_wan_alias"
+        if [[ -f "$_wan_src" && ! -e "$_wan_dst" ]]; then
+            ln -s "Wan2.2/$_wan_alias" "$_wan_dst" || true
+        fi
+    done
 fi
 if (( WANT_MUSIC )); then
     require_file "$MODELS/checkpoints/ace_step_v1_3.5b.safetensors" $MIN_CHECKPOINT "ACE-Step checkpoint"

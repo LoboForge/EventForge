@@ -260,7 +260,17 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .badge.job-status.failed { background: #3a1a1a; color: #ff9a9a; }
 .error.inline { display: inline; background: none; border: none; padding: 0; margin-left: 8px; font-size: .8rem; }
 .muted-foot { font-size: .88rem; }
-.actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions-cell { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: .78rem;
+  color: var(--muted, #9aa3b2);
+  user-select: none;
+  white-space: nowrap;
+}
+.checkbox-inline input { margin: 0; }
 .small { font-size: .78rem; }
 
 /* Ops professional header */

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import logging
 from pathlib import Path
@@ -13,6 +14,126 @@ import loboforge_agent as agent
 log = logging.getLogger("gpu-agent-common")
 
 CHECK_IN_INTERVAL = 60
+
+# Disk headroom guard — refuse to claim jobs when the box is nearly out of space,
+# so a single "No space left on device" (Errno 28) box does not cascade-fail the
+# whole queue (e.g. one V100 burning 587 jobs). Thresholds match existing 2 GB
+# convention in loboforge_agent (maybe_free_comfy_disk / busy gate).
+DISK_MIN_FREE_MB = int(os.environ.get("FORGE_QUEUE_DISK_MIN_FREE_MB", "2048"))
+DISK_MIN_FREE_PCT = float(os.environ.get("FORGE_QUEUE_DISK_MIN_FREE_PCT", "5"))
+# Percentage gate only bites when absolute free is also below this cap, so a box
+# with tens of GB free on a large volume (low % but plenty of space) keeps claiming.
+DISK_PCT_ABS_CAP_MB = int(os.environ.get("FORGE_QUEUE_DISK_PCT_ABS_CAP_MB", "20480"))
+
+
+def vision_models_allowed() -> bool:
+    """Vision/tagging models are OFF unless LOBO_ALLOW_VISION=1 (extreme privacy)."""
+    return (os.environ.get("LOBO_ALLOW_VISION") or "").strip().lower() in ("1", "true", "yes")
+
+
+
+def _disk_mounts_to_check() -> list[str]:
+    """Distinct mounts that matter for a job: root + Comfy models + WAN model root."""
+    candidates = ["/"]
+    try:
+        root = _find_comfy_models_root()
+        if root is not None:
+            candidates.append(str(root))
+    except Exception:
+        pass
+    wan_root = (os.environ.get("WAN_MODEL_ROOT") or "").strip()
+    if wan_root:
+        candidates.append(wan_root)
+    seen_dev: set[int] = set()
+    out: list[str] = []
+    for path in candidates:
+        try:
+            dev = os.stat(path).st_dev
+        except OSError:
+            continue
+        if dev in seen_dev:
+            continue
+        seen_dev.add(dev)
+        out.append(path)
+    return out
+
+
+def evaluate_disk_headroom(
+    min_free_mb: int = DISK_MIN_FREE_MB,
+    min_free_pct: float = DISK_MIN_FREE_PCT,
+    pct_abs_cap_mb: int = DISK_PCT_ABS_CAP_MB,
+) -> dict[str, Any]:
+    """Inspect relevant mounts; report ok + the tightest mount's free space."""
+    import shutil
+
+    ok = True
+    worst: dict[str, Any] | None = None
+    worst_free_mb: int | None = None
+    for path in _disk_mounts_to_check():
+        try:
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        free_mb = int(usage.free // (1024 * 1024))
+        pct = (usage.free / usage.total * 100.0) if usage.total else 100.0
+        low_abs = free_mb < min_free_mb
+        low_pct = pct < min_free_pct and free_mb < pct_abs_cap_mb
+        if low_abs or low_pct:
+            ok = False
+        if worst_free_mb is None or free_mb < worst_free_mb:
+            worst_free_mb = free_mb
+            worst = {"path": path, "free_mb": free_mb, "free_pct": round(pct, 2)}
+    return {
+        "ok": ok,
+        "min_free_mb": min_free_mb,
+        "min_free_pct": min_free_pct,
+        "free_mb": worst_free_mb if worst_free_mb is not None else -1,
+        "worst": worst,
+    }
+
+
+def is_disk_full_error(text: Any) -> bool:
+    """True when an error string/exception looks like ENOSPC (Errno 28)."""
+    t = str(text or "").lower()
+    return "errno 28" in t or "no space left" in t or "enospc" in t
+
+
+def mark_disk_full(state: dict, reason: str = "disk_full") -> None:
+    """Force the claim-paused disk-full flag after an observed ENOSPC failure."""
+    if not state.get("disk_full"):
+        log.error("Disk full (ENOSPC) — pausing job claims: %s", reason)
+    state["disk_full"] = True
+    state["claim_paused_reason"] = reason or "disk_full"
+
+
+def refresh_disk_guard(
+    state: dict,
+    *,
+    min_free_mb: int = DISK_MIN_FREE_MB,
+    min_free_pct: float = DISK_MIN_FREE_PCT,
+) -> dict[str, Any]:
+    """Re-evaluate disk headroom each loop; set/clear disk_full + claim_paused_reason."""
+    headroom = evaluate_disk_headroom(min_free_mb, min_free_pct)
+    state["disk_headroom"] = headroom
+    if headroom["ok"]:
+        if state.get("disk_full"):
+            log.warning(
+                "Disk headroom restored (free=%sMB) — resuming job claims",
+                headroom.get("free_mb"),
+            )
+        state["disk_full"] = False
+        # Only clear our own reason — LoRA self-heal loops own their reasons.
+        if state.get("claim_paused_reason") == "disk_full":
+            state.pop("claim_paused_reason", None)
+    else:
+        if not state.get("disk_full"):
+            log.error(
+                "Disk headroom low (%s, min %sMB/%s%%) — pausing job claims",
+                headroom.get("worst"), min_free_mb, min_free_pct,
+            )
+        state["disk_full"] = True
+        state["claim_paused_reason"] = "disk_full"
+    return headroom
 
 
 def _load_persisted_env() -> None:
@@ -368,8 +489,8 @@ def download_eventforge_job_lora(
         return None
     dest = root / "loras" / safe
     dest.parent.mkdir(parents=True, exist_ok=True)
-    min_bytes = 1_000_000
-    if dest.is_file() and dest.stat().st_size >= min_bytes:
+    min_bytes = LORA_MIN_BYTES
+    if _lora_file_valid(dest, min_bytes=min_bytes):
         return dest
 
     import urllib.error
@@ -384,34 +505,56 @@ def download_eventforge_job_lora(
             "User-Agent": "LoboForge-Worker/1.1",
         },
     )
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    received = 0
+    declared = 0
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
-            data = resp.read()
+            declared = int(resp.headers.get("Content-Length", 0) or 0)
+            with tmp.open("wb") as stream:
+                while True:
+                    chunk = resp.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    received += len(chunk)
     except urllib.error.HTTPError as ex:
+        tmp.unlink(missing_ok=True)
         if ex.code == 404:
             return None
         log.warning("EventForge LoRA download HTTP %s for %s: %s", ex.code, safe, ex)
         return None
+    except OSError as ex:
+        tmp.unlink(missing_ok=True)
+        log.warning("EventForge LoRA write/download failed for %s: %s", safe, ex)
+        raise
     except Exception as ex:
+        tmp.unlink(missing_ok=True)
         log.warning("EventForge LoRA download failed for %s: %s", safe, ex)
         return None
 
-    if len(data) < min_bytes:
-        log.warning("EventForge LoRA %s too small (%d bytes)", safe, len(data))
+    if received < min_bytes:
+        tmp.unlink(missing_ok=True)
+        log.warning("EventForge LoRA %s too small (%d bytes)", safe, received)
         return None
-    tmp = dest.with_suffix(dest.suffix + ".partial")
+    if declared and received != declared:
+        tmp.unlink(missing_ok=True)
+        log.warning(
+            "EventForge LoRA %s truncated: got %d bytes, Content-Length %d",
+            safe, received, declared,
+        )
+        return None
+    if not _lora_file_valid(tmp, min_bytes=min_bytes):
+        tmp.unlink(missing_ok=True)
+        log.warning("EventForge LoRA %s failed validation after download", safe)
+        return None
     try:
-        tmp.write_bytes(data)
         tmp.replace(dest)
     except OSError as ex:
-        if tmp.is_file():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        log.warning("EventForge LoRA write failed for %s: %s", safe, ex)
+        tmp.unlink(missing_ok=True)
+        log.warning("EventForge LoRA finalize failed for %s: %s", safe, ex)
         raise
-    log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, len(data), job_id[:8])
+    log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, received, job_id[:8])
     return dest
 
 
@@ -432,6 +575,7 @@ def pull_missing_loras_from_eventforge(
         if path is not None:
             pulled.append(_normalize_lora_basename(name))
     return pulled
+
 
 def pull_missing_loras_from_loboforge(
     args: argparse.Namespace,
@@ -531,6 +675,47 @@ def pull_missing_loras_from_loboforge(
 
 
 
+LORA_MIN_BYTES = 1_000_000
+
+
+def _safetensors_appears_valid(path: Path) -> bool:
+    """Validate the safetensors header and ensure its declared data fits on disk."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                return False
+            header_len = int.from_bytes(prefix, "little", signed=False)
+            if header_len <= 0 or header_len > 100 * 1024 * 1024 or 8 + header_len > size:
+                return False
+            header = json.loads(stream.read(header_len).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(header, dict):
+        return False
+    max_end = 0
+    for name, meta in header.items():
+        if name == "__metadata__" or not isinstance(meta, dict):
+            continue
+        offsets = meta.get("data_offsets")
+        if isinstance(offsets, (list, tuple)) and len(offsets) == 2:
+            try:
+                max_end = max(max_end, int(offsets[1]))
+            except (TypeError, ValueError):
+                continue
+    return size >= 8 + header_len + max_end
+
+
+def _lora_file_valid(path: Path, *, min_bytes: int = LORA_MIN_BYTES) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size < min_bytes:
+            return False
+    except OSError:
+        return False
+    return path.suffix.lower() != ".safetensors" or _safetensors_appears_valid(path)
+
+
 def _normalize_lora_basename(raw: str) -> str:
     if not raw:
         return ""
@@ -602,13 +787,15 @@ def _lora_on_disk(lora_name: str, *, min_bytes: int = 1_000_000) -> bool:
             continue
         for candidate in (d / target, d / lora_name):
             try:
-                if candidate.is_file() and candidate.stat().st_size >= min_bytes:
+                if _lora_file_valid(candidate, min_bytes=min_bytes):
                     return True
             except OSError:
                 continue
+        # Comfy indexes loras/ recursively (subfolders like Wan2.2/, F2Klein/) —
+        # presence check must match that or we re-download files we already have.
         try:
-            for f in d.glob("*.safetensors"):
-                if _lora_basenames_match(f.name, target) and f.stat().st_size >= min_bytes:
+            for f in d.rglob("*.safetensors"):
+                if _lora_basenames_match(f.name, target) and _lora_file_valid(f, min_bytes=min_bytes):
                     return True
         except OSError:
             continue
@@ -616,28 +803,66 @@ def _lora_on_disk(lora_name: str, *, min_bytes: int = 1_000_000) -> bool:
 
 
 def worker_has_lora(state: dict, lora_name: str) -> bool:
+    """True only when the LoRA file is on disk.
+
+    Inventory lists (`known_loras` / Comfy model index) are advisory only —
+    never accept a job based on a stale in-memory list.
+    """
     if not lora_name:
         return True
     target = _normalize_lora_basename(lora_name).lower()
     if not target:
         return True
-    for k in state.get("known_loras") or []:
-        if _lora_basenames_match(k, target):
-            return True
-    for k in (state.get("models") or {}).get("loras") or []:
-        if _lora_basenames_match(k, target):
-            return True
     return _lora_on_disk(lora_name)
+
+
+def remove_invalid_lora_files(lora_names: list[str]) -> list[str]:
+    """Delete only corrupt/truncated copies matching the requested basenames."""
+    wanted = {
+        _normalize_lora_basename(name).lower()
+        for name in lora_names
+        if _normalize_lora_basename(name)
+    }
+    if not wanted:
+        return []
+    removed: list[str] = []
+    dirs = list(_native_wan_lora_dirs())
+    root = _find_comfy_models_root()
+    if root is not None:
+        dirs.append(root / "loras")
+    seen: set[str] = set()
+    for directory in dirs:
+        if str(directory) in seen or not _safe_is_dir(directory):
+            continue
+        seen.add(str(directory))
+        try:
+            candidates = list(directory.rglob("*.safetensors"))
+        except OSError:
+            continue
+        for path in candidates:
+            if path.name.lower() not in wanted or _lora_file_valid(path):
+                continue
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError as ex:
+                log.warning("Could not remove invalid LoRA %s: %s", path, ex)
+    return removed
 
 
 async def _sync_lora_inventory(state: dict, args) -> None:
     models = await agent.get_available_models(args.comfyui_http)
     state["models"] = models
-    known = state.setdefault("known_loras", [])
+    known: list[str] = []
     for name in models.get("loras") or []:
         base = _normalize_lora_basename(name)
-        if base and not any(_lora_basenames_match(k, base) for k in known):
+        if (
+            base
+            and worker_has_lora(state, base)
+            and not any(_lora_basenames_match(k, base) for k in known)
+        ):
             known.append(base)
+    state["known_loras"] = known
 
 
 def resolve_claim_ready_capabilities(
@@ -646,15 +871,46 @@ def resolve_claim_ready_capabilities(
     *,
     hostname: str | None = None,
 ) -> list[str]:
-    """Capabilities this worker should poll — only those with required models on disk."""
+    """Capabilities this worker should poll — only those with required models on disk.
+
+    LoRAs are deliberately NOT part of this gate: a worker with the complete Wan
+    stack must keep serving vanilla (no-LoRA) jobs. Per-job LoRA routing is the
+    server's responsibility (JobService.BuildLoraGate against known_loras, which
+    only ever lists validated files).
+    """
     return [
         cap for cap in capabilities
         if worker_can_poll_capability(state, cap, hostname=hostname)
     ]
 
 
+def comfy_inventory_stale_vs_disk(state: dict, *, hostname: str | None = None) -> bool:
+    """True when Wan weights are on disk but Comfy's UNET inventory hasn't picked them up.
+
+    ComfyUI caches its diffusion_models folder listing at startup; a 74GB fp8 Wan
+    download that finishes *after* Comfy booted is not reflected in
+    ``/object_info/UNETLoader`` until Comfy re-indexes (historically a manual
+    restart). When that happens ``claim_ready`` for wan stays empty forever even
+    though the files are present. Detecting this lets the agent force a re-index
+    instead of waiting for a human.
+
+    Native Wan/LTX boxes read the disk layout directly (no Comfy inventory), so
+    they never hit this and always return False.
+    """
+    if _is_native_wan_box(hostname) or _is_native_ltx_box(hostname):
+        return False
+    models = state.get("models") or {}
+    unets = list(models.get("unets") or [])
+    if _comfy_wan_disk_ready(kind="i2v") and not _wan_noise_pair_present(unets, kind="i2v"):
+        return True
+    if _comfy_wan_disk_ready(kind="t2v") and not _wan_noise_pair_present(unets, kind="t2v"):
+        return True
+    return False
+
+
 def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]) -> dict[str, Any]:
     gpu_info = agent.get_gpu_info()
+    refresh_disk_guard(agent_state)
     models = agent_state.get("models") or {}
     caps = agent_state.get("forge_queue_capabilities") or []
     claim_ready = resolve_claim_ready_capabilities(agent_state, caps, hostname=args.hostname)
@@ -665,6 +921,7 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "vram_total": gpu_info.get("vram_total", 0),
         "vram_free": agent.get_vram_free(),
         "disk_free_mb": agent.get_disk_free_mb(),
+        "disk_full": bool(agent_state.get("disk_full")),
         "models": _models_for_check_in(models),
         "known_loras": agent_state.get("known_loras", []),
         "busy": agent.agent_fleet_busy(agent_state),
@@ -675,13 +932,20 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
         "forge_queue_capabilities": list(caps),
         "claim_ready_capabilities": claim_ready,
         "capabilities": {
-            "wd14": agent.WD14_AVAILABLE,
-            "joycaption": agent.JOYCAPTION_AVAILABLE,
+            "wd14": bool(agent.WD14_AVAILABLE) and vision_models_allowed(),
+            "joycaption": bool(agent.JOYCAPTION_AVAILABLE) and vision_models_allowed(),
         },
     }
+    if agent_state.get("claim_paused_reason"):
+        payload["claim_paused_reason"] = agent_state["claim_paused_reason"]
+    if isinstance(agent_state.get("disk_headroom"), dict):
+        payload["disk_headroom"] = agent_state["disk_headroom"]
     gen_mode = (os.environ.get("LOBO_GEN_QUEUE") or "").strip().lower()
     if gen_mode in ("sqs", "eventforge") or caps or os.environ.get("EVENT_FORGE_URL"):
         payload.update(probe_event_forge_access(list(caps)))
+    # claim_paused_reason is surfaced above as its own field — never override
+    # queue_access_ok for LoRA degradation. The box still serves vanilla jobs,
+    # and flipping the EF-queue badge could get it quarantined by monitors.
     return payload
 
 
@@ -767,6 +1031,39 @@ def _has_lens_text_encoder(assets: list[str]) -> bool:
     return False
 
 
+def _comfy_wan_disk_ready(*, kind: str = "i2v") -> bool:
+    """Disk truth for Comfy Wan — never claim-ready on missing/partial/corrupt weights.
+
+    Inventory alone can lag or lie after a false provision-complete. The COMPLETE
+    stack must be on disk: high+low noise UNETs, the umt5 text encoder, and the
+    Wan VAE — each validated (safetensors header + declared data region), so a
+    truncated download can never make the box advertise wan.
+    """
+    root = _find_comfy_models_root()
+    if root is None:
+        return False
+    dm = root / "diffusion_models"
+    prefix = "wan2.2_i2v" if kind == "i2v" else "wan2.2_t2v"
+    high = f"{prefix}_high_noise_14B_fp8_scaled.safetensors"
+    low = f"{prefix}_low_noise_14B_fp8_scaled.safetensors"
+
+    def _unet_ok(name: str) -> bool:
+        for candidate in (dm / "Wan2.2" / name, dm / name):
+            if _lora_file_valid(candidate, min_bytes=1_000_000_000):
+                return True
+        return False
+
+    te_ok = any(
+        _lora_file_valid(p, min_bytes=1_000_000_000)
+        for p in (
+            root / "text_encoders" / "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            root / "clip" / "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        )
+    )
+    vae_ok = _lora_file_valid(root / "vae" / "wan_2.1_vae.safetensors", min_bytes=100_000_000)
+    return _unet_ok(high) and _unet_ok(low) and te_ok and vae_ok
+
+
 def _wan_noise_pair_present(names: list[str], *, kind: str) -> bool:
     """True only when both high-noise and low-noise UNETs for kind (i2v/t2v) are listed.
 
@@ -791,10 +1088,14 @@ def _wan_noise_pair_present(names: list[str], *, kind: str) -> bool:
 
 
 def _has_wan_i2v(models: dict) -> bool:
+    if not _comfy_wan_disk_ready(kind="i2v"):
+        return False
     return _wan_noise_pair_present(list(models.get("unets") or []), kind="i2v")
 
 
 def _has_wan_t2v(models: dict) -> bool:
+    if not _comfy_wan_disk_ready(kind="t2v"):
+        return False
     return _wan_noise_pair_present(list(models.get("unets") or []), kind="t2v")
 
 
@@ -897,6 +1198,8 @@ def worker_can_run_model(
         return _has_lens_text_encoder(assets) or any("lens" in m.lower() for m in assets)
 
     if lower in ("joycaption", "joy-caption"):
+        if not vision_models_allowed():
+            return False
         caps = state.get("capabilities") or {}
         if caps.get("joycaption"):
             return True
@@ -967,5 +1270,7 @@ def worker_can_run_assign(
 ) -> bool:
     model = (assign.get("model") or "").strip()
     if assign.get("caption") or model == "joycaption":
+        if not vision_models_allowed():
+            return False
         return worker_can_run_model(state, "joycaption", hostname=hostname, capability=capability)
     return worker_can_run_model(state, model, hostname=hostname, capability=capability)

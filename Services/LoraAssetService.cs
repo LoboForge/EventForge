@@ -168,6 +168,9 @@ public sealed class LoraAssetService
         return record;
     }
 
+    public LoraAssetRecord? GetReadyForAppFile(string appId, string fileName) =>
+        _catalog.TryGetReadyByAppFile(appId, fileName);
+
     public async Task<bool> DeleteForAppAsync(string appId, string assetId, CancellationToken ct)
     {
         var record = GetForApp(appId, assetId);

@@ -396,7 +396,7 @@ Events without `tenant_id` may be accepted on legacy paths; new integrations sho
 | `normal` | Standard interactive jobs | Default for roleplay/chat |
 | `bulk` | Batch generation, captions | Default when tier omitted; drained last |
 
-Workers send their supported **capabilities**; EventForge picks the highest-priority queued job matching any capability. Priority order: tier `admin` → `vip` → `normal` → `bulk`, then `queue_priority` (if set on the job), then FIFO by enqueue time.
+Workers send their supported **capabilities**; EventForge picks the highest-priority queued job matching any capability. Priority order: tier `admin` → `vip` → `normal` → `bulk`, then `queue_priority` (if set on the job), then FIFO by enqueue time. Ops can enable **random bulk** per consumer app (`POST /v1/ops/apps/{appId}/random-bulk`); when the winning job is that app's `bulk` tier, EventForge picks uniformly among that app's claimable bulk jobs at the same `queue_priority` instead of FIFO.
 
 Map your app’s internal priority to tier strings consistently. LoboForge reference mapping (`QueuePriority.TopicTierForJob`):
 
@@ -537,10 +537,26 @@ Content-Type: application/json
 }
 ```
 
-- **`204 No Content`** — no job available; poll again after a short delay.
+- **`204 No Content`** — no job leased; poll again after a short delay. Current
+  servers also return diagnostic headers:
+  `X-EventForge-Queued-Matching`, `X-EventForge-Blocked-Paused`,
+  `X-EventForge-Blocked-Model`, `X-EventForge-Blocked-Lora`, and a bounded
+  `X-EventForge-Missing-Loras` hint. A non-zero queued/blocked count means the
+  queue is not empty—the worker's inventory or app state prevented a lease.
+  Agents should self-heal or report degraded status rather than presenting this
+  state as healthy idle.
 - **`200 OK`** — job leased; body includes `job_id`, `payload`, `leased_until`, `kind`, `tier`.
 
-The server selects the first valid job across all listed capabilities using tier priority (`admin` > `vip` > `normal` > `bulk`), then FIFO within tier. Workers should **not** loop tiers client-side — one claim call per poll.
+The server selects the first valid job across all listed capabilities using tier priority (`admin` > `vip` > `normal` > `bulk`), then `queue_priority`, then FIFO within tier — unless the consumer has **random bulk** enabled, in which case a random job is chosen among that app's claimable bulk jobs at the winning priority. Workers should **not** loop tiers client-side — one claim call per poll.
+
+While idle, current workers call
+`GET /v1/workers/loras/needed?hostname=...&capabilities=wan,...` with the worker
+key. The response lists ready EventForge assets referenced by queued jobs and
+their job-scoped download URLs. Workers download, structurally validate, and
+publish those files in `known_loras` on check-in. Merely having a ready asset in
+EventForge does **not** make a worker claim-eligible: the claim gate requires the
+worker's validated inventory, so a failed/partial prefetch cannot turn into a
+leased job failure. Jobs with no LoRA requirement are unaffected.
 
 **Legacy (back compat):** `{ "capability": "flux-klein", "tier": "*" }` still works for older workers.
 

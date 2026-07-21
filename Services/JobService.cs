@@ -19,6 +19,12 @@ public sealed record ClaimDiagnostics(
     int BlockedLora,
     IReadOnlyList<string> MissingLoras);
 
+public sealed record LoraPrefetchItem(
+    string JobId,
+    string FileName,
+    long? Bytes,
+    string? Sha256);
+
 /// <summary>Result of an ops moderation delete of a finished job.</summary>
 /// <param name="Found">Whether a job record existed.</param>
 /// <param name="Status">Status the job had when found.</param>
@@ -121,7 +127,8 @@ public sealed class JobService
 
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
         var canClaim = BuildCanClaimPredicate(workerHostname);
-        var job = _queue.TryClaim(capability, tier, workerId, workerHostname, lease, canClaim);
+        var job = _queue.TryClaim(
+            capability, tier, workerId, workerHostname, lease, canClaim, _apps.IsRandomBulk);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
     }
 
@@ -138,7 +145,8 @@ public sealed class JobService
 
         var lease = TimeSpan.FromSeconds(Math.Max(60, _opts.LeaseSeconds));
         var canClaim = BuildCanClaimPredicate(workerHostname);
-        var job = _queue.TryClaimAny(readyCaps, workerId, workerHostname, lease, canClaim);
+        var job = _queue.TryClaimAny(
+            readyCaps, workerId, workerHostname, lease, canClaim, _apps.IsRandomBulk);
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
     }
 
@@ -228,34 +236,76 @@ public sealed class JobService
 
     private Func<JobRecord, bool> BuildLoraGate(string? workerHostname)
     {
-        var hn = workerHostname ?? "";
-        // Native Wan pulls LoRAs on-demand after claim — do not block the queue head on check-in inventory.
-        if (hn.Contains("wan-native", StringComparison.OrdinalIgnoreCase)
-            || hn.StartsWith("loboforge-wan-", StringComparison.OrdinalIgnoreCase))
-            return _ => true;
-
         var worker = _fleet.TryGetWorkerByHostname(workerHostname);
         var knownLoras = worker?.KnownLoras ?? [];
         var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
         return job => WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson).All(req =>
-            WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req)
-            || _loras.AppHasReadyLora(job.AppId, req));
+            WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req));
     }
 
     private IReadOnlyList<string> MissingWorkerLoras(string? workerHostname, JobRecord job)
     {
-        var hn = workerHostname ?? "";
-        if (hn.Contains("wan-native", StringComparison.OrdinalIgnoreCase)
-            || hn.StartsWith("loboforge-wan-", StringComparison.OrdinalIgnoreCase))
-            return [];
-
         var worker = _fleet.TryGetWorkerByHostname(workerHostname);
         var knownLoras = worker?.KnownLoras ?? [];
         var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
         return WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson)
             .Where(req => !WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req))
-            .Where(req => !_loras.AppHasReadyLora(job.AppId, req))
             .ToList();
+    }
+
+    /// <summary>
+    /// Ready EventForge assets needed by queued jobs this worker could otherwise
+    /// run. Workers call this while idle, validate each download, publish the
+    /// resulting known_loras inventory, and only then become claim-eligible.
+    /// </summary>
+    public IReadOnlyList<LoraPrefetchItem> GetQueuedLorasForPrefetch(
+        string? workerHostname,
+        IReadOnlyList<string>? capabilities,
+        int limit = 64)
+    {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var readyCaps = WorkerClaimPolicy.ClaimableCapabilities(worker);
+        if (capabilities is { Count: > 0 })
+        {
+            var requested = capabilities
+                .Where(cap => !string.IsNullOrWhiteSpace(cap))
+                .Select(cap => cap.Trim())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            readyCaps = readyCaps.Where(requested.Contains).ToList();
+        }
+        if (readyCaps.Count == 0) return [];
+
+        var capSet = readyCaps.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var modelGate = BuildModelGate(workerHostname);
+        var knownLoras = worker?.KnownLoras ?? [];
+        var modelAssets = WorkerModelAssets.FromJson(worker?.ModelsJson);
+        var result = new List<LoraPrefetchItem>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var job in _queue.SnapshotJobs()
+                     .Where(job => job.Status == JobStatus.Queued)
+                     .Where(job => capSet.Contains(job.Capability))
+                     .Where(job => !_apps.IsPaused(job.AppId))
+                     .Where(modelGate)
+                     .OrderBy(job => job.CreatedAt))
+        {
+            foreach (var required in WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson))
+            {
+                var name = WorkerLoraCompatibility.NormalizeBasename(required);
+                if (string.IsNullOrWhiteSpace(name)
+                    || WorkerLoraCompatibility.WorkerHasLora(knownLoras, modelAssets, name)
+                    || !seen.Add(name))
+                    continue;
+
+                var asset = _loras.GetReadyForAppFile(job.AppId, name);
+                if (asset == null) continue;
+                result.Add(new LoraPrefetchItem(job.JobId, asset.FileName, asset.Bytes, asset.Sha256));
+                if (result.Count >= Math.Clamp(limit, 1, 256))
+                    return result;
+            }
+        }
+
+        return result;
     }
 
     /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).

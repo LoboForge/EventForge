@@ -69,11 +69,11 @@ bash "$(dirname "$0")/eventforge-pre-deploy-persist.sh"
 OLD_TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" \
   --desired-status RUNNING --region "$REGION" --query 'taskArns[0]' --output text 2>/dev/null || true)
 
-step "Update service (desiredCount=1, minHealthy=0, maxPercent=100)"
+step "Update service (desiredCount=1, minHealthy=100, maxPercent=200 — new task healthy before old drains)"
 UPDATE_ARGS=(
   --cluster "$CLUSTER" --service "$SERVICE"
   --task-definition "$NEW_ARN" --desired-count 1
-  --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}"
+  --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}"
   --force-new-deployment --region "$REGION"
 )
 # Best-effort: older AWS CLI images may lack this flag.
@@ -82,8 +82,8 @@ if aws ecs update-service help 2>/dev/null | grep -q availability-zone-rebalanci
 fi
 aws ecs update-service "${UPDATE_ARGS[@]}" >/dev/null
 
-step "Wait for single new task healthy (up to 5 min)"
-for i in $(seq 1 60); do
+step "Wait for rolling cutover (new task up, old drained — up to 8 min)"
+for i in $(seq 1 48); do
   DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "$REGION" \
     --query 'services[0].desiredCount' --output text)
   if [[ "$DESIRED" != "1" ]]; then
@@ -101,18 +101,22 @@ for i in $(seq 1 60); do
     --query 'services[0].taskDefinition' --output text)
   CUR_TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" \
     --desired-status RUNNING --region "$REGION" --query 'taskArns[0]' --output text 2>/dev/null || true)
+  PRIMARY_RUNNING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "$REGION" \
+    --query 'services[0].deployments[?status==`PRIMARY`].runningCount | [0]' --output text)
 
   NEW_TASK_UP=0
   if [[ -n "$CUR_TASK" && "$CUR_TASK" != "None" && "$CUR_TASK" != "$OLD_TASK" ]]; then
     NEW_TASK_UP=1
   fi
 
+  # Zero-downtime: PRIMARY must be healthy on the new task definition; old
+  # deployment drained (single deployment, runningCount=1).
   if [[ "$RUNNING" == "1" && "$DEP_COUNT" == "1" && "$ROLL" == "COMPLETED" && "$CUR_TD" == "$NEW_ARN" && "$NEW_TASK_UP" == "1" ]] \
       && curl -sf --max-time 10 "$HEALTH_URL" >/dev/null 2>&1; then
     echo "✓ Healthy after ${i}0s — $NEW_ARN (task ${CUR_TASK##*/})"
     exit 0
   fi
-  echo "  [$i/60] running=$RUNNING deployments=$DEP_COUNT rollout=$ROLL new_task=$NEW_TASK_UP waiting..."
+  echo "  [$i/48] running=$RUNNING primary=$PRIMARY_RUNNING deployments=$DEP_COUNT rollout=$ROLL new_task=$NEW_TASK_UP waiting..."
   sleep 10
 done
 echo "Deploy timed out waiting for health" >&2

@@ -90,20 +90,33 @@ async def start_sqs_background_provision(args: Any, agent_state: dict) -> "async
     log.info("SQS agent starting background model provision (mode=%s)", pa.provision_mode)
 
     async def _watch() -> None:
-        try:
-            if runner._task:
+        while True:
+            try:
+                if not runner._task:
+                    return
                 result = await runner._task
-                agent_state["provisioning"] = False
-                if isinstance(result, dict) and result.get("ok"):
+                if isinstance(result, dict) and result.get("ok") and result.get("complete", True):
+                    agent_state["provisioning"] = False
                     agent_state["provision_step"] = "ready"
                     agent_state["provision_pct"] = 100
                     log.info("Background model provision complete")
-                else:
-                    err = result.get("error") if isinstance(result, dict) else str(result)
-                    log.warning("Background model provision failed: %s", err)
-        except Exception as ex:
-            agent_state["provisioning"] = False
-            log.warning("Background model provision error: %s", ex)
+                    return
+                if isinstance(result, dict) and result.get("complete") is False:
+                    miss = result.get("required_missing") or result.get("missing") or []
+                    log.warning("Background provision incomplete (%s) — retry in 60s", miss[:5])
+                    agent_state["provision_step"] = "retrying"
+                    await asyncio.sleep(60)
+                    runner.start_background()
+                    continue
+                err = result.get("error") if isinstance(result, dict) else str(result)
+                log.warning("Background model provision failed: %s — retry in 120s", err)
+                agent_state["provision_step"] = "retrying"
+                await asyncio.sleep(120)
+                runner.start_background()
+            except Exception as ex:
+                agent_state["provisioning"] = False
+                log.warning("Background model provision error: %s", ex)
+                return
 
     return asyncio.create_task(_watch())
 

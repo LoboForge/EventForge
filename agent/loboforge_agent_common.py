@@ -122,7 +122,9 @@ def refresh_disk_guard(
                 headroom.get("free_mb"),
             )
         state["disk_full"] = False
-        state.pop("claim_paused_reason", None)
+        # Only clear our own reason — LoRA self-heal loops own their reasons.
+        if state.get("claim_paused_reason") == "disk_full":
+            state.pop("claim_paused_reason", None)
     else:
         if not state.get("disk_full"):
             log.error(
@@ -524,43 +526,49 @@ def download_eventforge_job_lora(
             "User-Agent": "LoboForge-Worker/1.1",
         },
     )
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    received = 0
+    declared = 0
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
             declared = int(resp.headers.get("Content-Length", 0) or 0)
-            data = resp.read()
+            with tmp.open("wb") as stream:
+                while True:
+                    chunk = resp.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    received += len(chunk)
     except urllib.error.HTTPError as ex:
+        tmp.unlink(missing_ok=True)
         if ex.code == 404:
             return None
         log.warning("EventForge LoRA download HTTP %s for %s: %s", ex.code, safe, ex)
         return None
+    except OSError as ex:
+        tmp.unlink(missing_ok=True)
+        log.warning("EventForge LoRA write/download failed for %s: %s", safe, ex)
+        raise
     except Exception as ex:
+        tmp.unlink(missing_ok=True)
         log.warning("EventForge LoRA download failed for %s: %s", safe, ex)
         return None
 
-    if len(data) < min_bytes:
-        log.warning("EventForge LoRA %s too small (%d bytes)", safe, len(data))
+    if received < min_bytes:
+        tmp.unlink(missing_ok=True)
+        log.warning("EventForge LoRA %s too small (%d bytes)", safe, received)
         return None
-    if declared and len(data) != declared:
+    if declared and received != declared:
+        tmp.unlink(missing_ok=True)
         log.warning(
             "EventForge LoRA %s truncated: got %d bytes, Content-Length %d",
-            safe, len(data), declared,
+            safe, received, declared,
         )
         return None
-    tmp = dest.with_suffix(dest.suffix + ".partial")
-    try:
-        tmp.write_bytes(data)
-    except OSError as ex:
-        if tmp.is_file():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        log.warning("EventForge LoRA write failed for %s: %s", safe, ex)
-        raise
     if not _finalize_downloaded_lora(tmp, dest, min_bytes=min_bytes):
         log.warning("EventForge LoRA %s failed validation after download", safe)
         return None
-    log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, len(data), job_id[:8])
+    log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, received, job_id[:8])
     return dest
 
 
@@ -898,14 +906,55 @@ def worker_has_lora(state: dict, lora_name: str) -> bool:
     return _lora_on_disk(lora_name)
 
 
+def remove_invalid_lora_files(lora_names: list[str]) -> list[str]:
+    """Delete only corrupt/truncated copies matching the requested basenames."""
+    wanted = {
+        _normalize_lora_basename(name).lower()
+        for name in lora_names
+        if _normalize_lora_basename(name)
+    }
+    if not wanted:
+        return []
+    removed: list[str] = []
+    dirs = list(_native_wan_lora_dirs())
+    root = _find_comfy_models_root()
+    if root is not None:
+        dirs.append(root / "loras")
+    seen: set[str] = set()
+    for directory in dirs:
+        if str(directory) in seen or not _safe_is_dir(directory):
+            continue
+        seen.add(str(directory))
+        try:
+            candidates = list(directory.rglob("*.safetensors"))
+        except OSError:
+            continue
+        for path in candidates:
+            if path.name.lower() not in wanted or _lora_file_valid(path):
+                continue
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError as ex:
+                log.warning("Could not remove invalid LoRA %s: %s", path, ex)
+    return removed
+
+
 async def _sync_lora_inventory(state: dict, args) -> None:
     models = await agent.get_available_models(args.comfyui_http)
     state["models"] = models
-    known = state.setdefault("known_loras", [])
+    known: list[str] = []
     for name in models.get("loras") or []:
         base = _normalize_lora_basename(name)
-        if base and not any(_lora_basenames_match(k, base) for k in known):
+        if (
+            base
+            and worker_has_lora(state, base)
+            and not any(_lora_basenames_match(k, base) for k in known)
+        ):
             known.append(base)
+    # Replace instead of append: EventForge's LoRA claim gate must never trust a
+    # filename that was deleted, truncated, or disappeared with a remounted disk.
+    state["known_loras"] = known
 
 
 def resolve_claim_ready_capabilities(
@@ -914,7 +963,13 @@ def resolve_claim_ready_capabilities(
     *,
     hostname: str | None = None,
 ) -> list[str]:
-    """Capabilities this worker should poll — only those with required models on disk."""
+    """Capabilities this worker should poll — only those with required models on disk.
+
+    LoRAs are deliberately NOT part of this gate: a worker with the complete Wan
+    stack must keep serving vanilla (no-LoRA) jobs. Per-job LoRA routing is the
+    server's responsibility (JobService.BuildLoraGate against known_loras, which
+    only ever lists validated files).
+    """
     return [
         cap for cap in capabilities
         if worker_can_poll_capability(state, cap, hostname=hostname)
@@ -980,6 +1035,9 @@ def build_check_in_payload(args: argparse.Namespace, agent_state: dict[str, Any]
     gen_mode = (os.environ.get("LOBO_GEN_QUEUE") or "").strip().lower()
     if gen_mode in ("sqs", "eventforge") or caps or os.environ.get("EVENT_FORGE_URL"):
         payload.update(probe_event_forge_access(list(caps)))
+    # claim_paused_reason is surfaced above as its own field — never override
+    # queue_access_ok for LoRA degradation. The box still serves vanilla jobs,
+    # and flipping the EF-queue badge could get it quarantined by monitors.
     return payload
 
 
@@ -1066,10 +1124,12 @@ def _has_lens_text_encoder(assets: list[str]) -> bool:
 
 
 def _comfy_wan_disk_ready(*, kind: str = "i2v") -> bool:
-    """Disk truth for Comfy Wan — never claim-ready on empty/corrupt weights.
+    """Disk truth for Comfy Wan — never claim-ready on missing/partial/corrupt weights.
 
-    Inventory alone can lag or lie after a false provision-complete; require real
-    high+low noise files (Wan2.2/ or top-level aliases) with a sane min size.
+    Inventory alone can lag or lie after a false provision-complete. The COMPLETE
+    stack must be on disk: high+low noise UNETs, the umt5 text encoder, and the
+    Wan VAE — each validated (safetensors header + declared data region), so a
+    truncated download can never make the box advertise wan.
     """
     root = _find_comfy_models_root()
     if root is None:
@@ -1078,18 +1138,22 @@ def _comfy_wan_disk_ready(*, kind: str = "i2v") -> bool:
     prefix = "wan2.2_i2v" if kind == "i2v" else "wan2.2_t2v"
     high = f"{prefix}_high_noise_14B_fp8_scaled.safetensors"
     low = f"{prefix}_low_noise_14B_fp8_scaled.safetensors"
-    min_bytes = 1_000_000_000
 
-    def _ok(name: str) -> bool:
+    def _unet_ok(name: str) -> bool:
         for candidate in (dm / "Wan2.2" / name, dm / name):
-            try:
-                if candidate.is_file() and candidate.stat().st_size >= min_bytes:
-                    return True
-            except OSError:
-                continue
+            if _lora_file_valid(candidate, min_bytes=1_000_000_000):
+                return True
         return False
 
-    return _ok(high) and _ok(low)
+    te_ok = any(
+        _lora_file_valid(p, min_bytes=1_000_000_000)
+        for p in (
+            root / "text_encoders" / "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            root / "clip" / "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        )
+    )
+    vae_ok = _lora_file_valid(root / "vae" / "wan_2.1_vae.safetensors", min_bytes=100_000_000)
+    return _unet_ok(high) and _unet_ok(low) and te_ok and vae_ok
 
 
 def _wan_noise_pair_present(names: list[str], *, kind: str) -> bool:

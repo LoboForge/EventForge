@@ -10,7 +10,7 @@ Env:
     EVENT_FORGE_WORKER_KEY — worker bearer token
     FORGE_QUEUE_CAPABILITY — comma-list of capabilities to poll
     LOBO_BASE_URL, LOBO_SECRET — hub LoRA catalog sync + request-work prefetch (check-in is EventForge-only)
-    LOBO_LORA_SYNC_INTERVAL — seconds between active-loras pulls (default 1800)
+    LOBO_LORA_SYNC_INTERVAL — seconds between idle LoRA reconciles (default 300)
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from loboforge_agent_common import (
     extract_required_loras_from_assign,
     is_disk_full_error,
     mark_disk_full,
+    remove_invalid_lora_files,
     refresh_disk_guard,
     resolve_claim_ready_capabilities,
     resolve_lora_sync_mode,
@@ -71,6 +72,8 @@ DEFAULT_WORKER_KEY = os.environ.get("EVENT_FORGE_WORKER_KEY", "wrath-worker-key"
 CLAIM_IDLE_SECS = float(os.environ.get("EVENT_FORGE_CLAIM_IDLE", "2"))
 DISK_FULL_IDLE_SECS = float(os.environ.get("EVENT_FORGE_DISK_FULL_IDLE", "30"))
 UPLOAD_RETRIES = int(os.environ.get("EVENT_FORGE_UPLOAD_RETRIES", "5"))
+CLAIM_BLOCKED_HEAL_THRESHOLD = max(2, int(os.environ.get("EVENT_FORGE_CLAIM_BLOCKED_HEAL_THRESHOLD", "3")))
+CLAIM_BLOCKED_HEAL_COOLDOWN = max(30.0, float(os.environ.get("EVENT_FORGE_CLAIM_BLOCKED_HEAL_COOLDOWN", "120")))
 
 
 class EfGpuSession:
@@ -213,6 +216,7 @@ async def ef_claim_any(
     worker_key: str,
     capabilities: list[str],
     hostname: str,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     url = f"{ef_base}/v1/jobs/claim"
     headers = {
@@ -223,6 +227,25 @@ async def ef_claim_any(
     body = {"capabilities": capabilities, "hostname": hostname}
     async with http.post(url, json=body, headers=headers) as resp:
         if resp.status == 204:
+            if diagnostics is not None:
+                def _header_int(name: str) -> int:
+                    try:
+                        return int(resp.headers.get(name, "0") or 0)
+                    except (TypeError, ValueError):
+                        return 0
+
+                diagnostics.clear()
+                diagnostics.update({
+                    "queued_matching": _header_int("X-EventForge-Queued-Matching"),
+                    "blocked_paused": _header_int("X-EventForge-Blocked-Paused"),
+                    "blocked_model": _header_int("X-EventForge-Blocked-Model"),
+                    "blocked_lora": _header_int("X-EventForge-Blocked-Lora"),
+                    "missing_loras": [
+                        name.strip()
+                        for name in (resp.headers.get("X-EventForge-Missing-Loras") or "").split(",")
+                        if name.strip()
+                    ],
+                })
             return None
         if resp.status == 401:
             raise RuntimeError("EventForge claim unauthorized — check EVENT_FORGE_WORKER_KEY")
@@ -230,6 +253,81 @@ async def ef_claim_any(
             text = await resp.text()
             raise RuntimeError(f"EventForge claim HTTP {resp.status}: {text[:200]}")
         return await resp.json()
+
+
+def _lora_is_indexed(state: dict, lora_name: str) -> bool:
+    return any(
+        _lora_basenames_match(indexed, lora_name)
+        for indexed in (state.get("models") or {}).get("loras", [])
+    )
+
+
+async def _heal_lora_blocked_claims(
+    args: argparse.Namespace,
+    state: dict,
+    diagnostics: dict[str, Any],
+) -> None:
+    """Repair the false-healthy state: claim-ready, idle, but every queued job is LoRA-blocked."""
+    now = time.monotonic()
+    last = float(state.get("_claim_blocked_last_heal") or 0)
+    if now - last < CLAIM_BLOCKED_HEAL_COOLDOWN or state.get("_claim_blocked_healing"):
+        return
+
+    state["_claim_blocked_last_heal"] = now
+    state["_claim_blocked_healing"] = True
+    blocked = int(diagnostics.get("blocked_lora") or 0)
+    missing = list(diagnostics.get("missing_loras") or [])
+    state["claim_paused_reason"] = (
+        f"{blocked} queued job(s) blocked by missing LoRAs; self-healing"
+    )
+    log.warning(
+        "Claim-ready worker has %d LoRA-blocked queued job(s); syncing active LoRAs%s",
+        blocked,
+        f" ({', '.join(missing[:6])})" if missing else "",
+    )
+
+    try:
+        removed = remove_invalid_lora_files(missing)
+        if removed:
+            log.warning("Removed corrupt/truncated LoRAs before self-heal: %s", ", ".join(removed))
+        result = await asyncio.to_thread(
+            sync_hub_active_loras,
+            args,
+            resolve_lora_sync_mode(args.hostname),
+        )
+        await _sync_lora_inventory(state, args)
+
+        # Files may exist on disk while Comfy still serves a cached model list.
+        # Restart only while idle, and only when the diagnostic names prove the
+        # disk/index disagreement (or the sync just downloaded new files).
+        disk_ready = bool(missing) and all(worker_has_lora(state, name) for name in missing)
+        index_stale = disk_ready and any(not _lora_is_indexed(state, name) for name in missing)
+        if (index_stale or int(result.get("pulled") or 0) > 0) and not state.get("current_job"):
+            log.warning("LoRA files changed or Comfy inventory is stale — forcing idle ComfyUI re-index")
+            if await agent.force_restart_comfyui(args):
+                state["models"] = await agent.get_available_models(args.comfyui_http)
+                await _sync_lora_inventory(state, args)
+
+        failed = int(result.get("failed") or 0)
+        unresolved = [name for name in missing if not worker_has_lora(state, name)]
+        if failed or unresolved:
+            state["claim_paused_reason"] = (
+                f"LoRA self-heal incomplete: downloads_failed={failed}, "
+                f"still_missing={len(unresolved)}"
+            )
+            log.warning(
+                "LoRA claim self-heal incomplete — failed=%d unresolved=%s",
+                failed,
+                ", ".join(unresolved[:8]) or "none from diagnostic sample",
+            )
+        else:
+            state.pop("claim_paused_reason", None)
+            log.info("LoRA claim self-heal completed; claim inventory refreshed")
+    except Exception as ex:
+        state["claim_paused_reason"] = f"LoRA self-heal error: {type(ex).__name__}"
+        log.warning("LoRA claim self-heal failed: %s", ex)
+    finally:
+        state["_claim_blocked_healing"] = False
 
 
 
@@ -509,11 +607,18 @@ async def ef_api_check_in_once(
     try:
         models = await agent.get_available_models(args.comfyui_http)
         agent_state["models"] = models
-        known = agent_state.setdefault("known_loras", [])
+        known: list[str] = []
         for name in models.get("loras") or []:
             base_name = _normalize_lora_basename(name)
-            if base_name and not any(_lora_basenames_match(k, base_name) for k in known):
+            if (
+                base_name
+                and worker_has_lora(agent_state, base_name)
+                and not any(_lora_basenames_match(k, base_name) for k in known)
+            ):
                 known.append(base_name)
+        # Comfy's current inventory is authoritative. Appending forever preserves
+        # deleted/truncated files and makes EventForge falsely consider jobs runnable.
+        agent_state["known_loras"] = known
     except Exception as ex:
         log.warning("Model inventory refresh before check-in failed: %s", ex)
 
@@ -570,6 +675,8 @@ async def ef_consumer_loop(
         "EventForge consumer capabilities=%s worker_id=%s (claims use check-in claim_ready only)",
         capabilities, args.hostname,
     )
+    empty_claims = 0
+    claim_diagnostics: dict[str, Any] = {}
     while True:
         if state.get("current_job"):
             await asyncio.sleep(0.1)
@@ -599,11 +706,39 @@ async def ef_consumer_loop(
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue
 
-        job = await ef_claim_any(http, ef_base, worker_key, ready, args.hostname)
+        try:
+            job = await ef_claim_any(
+                http,
+                ef_base,
+                worker_key,
+                ready,
+                args.hostname,
+                claim_diagnostics,
+            )
+        except Exception as ex:
+            log.warning("EventForge claim error: %s", ex)
+            await asyncio.sleep(CLAIM_IDLE_SECS)
+            continue
         if job is None:
+            empty_claims += 1
+            queued = int(claim_diagnostics.get("queued_matching") or 0)
+            blocked_lora = int(claim_diagnostics.get("blocked_lora") or 0)
+            if (
+                queued > 0
+                and blocked_lora > 0
+                and empty_claims >= CLAIM_BLOCKED_HEAL_THRESHOLD
+            ):
+                await _heal_lora_blocked_claims(args, state, claim_diagnostics)
+                empty_claims = 0
             await asyncio.sleep(CLAIM_IDLE_SECS)
             continue
 
+        empty_claims = 0
+        claim_diagnostics.clear()
+        if str(state.get("claim_paused_reason") or "").startswith(
+            ("LoRA self-heal", "queued job", "LoRA claim")
+        ):
+            state.pop("claim_paused_reason", None)
         try:
             await process_ef_job(job, args, state, http, ef_base, worker_key)
         except Exception as ex:
@@ -614,28 +749,120 @@ async def ef_consumer_loop(
                     await ef_fail(http, ef_base, worker_key, jid, str(ex))
 
 
-async def ef_lora_sync_loop(args: argparse.Namespace, state: dict) -> None:
-    """Startup + periodic pull of active LoRAs for this box's mode from loboforge.com."""
-    interval = max(300, int(os.environ.get("LOBO_LORA_SYNC_INTERVAL", "1800")))
+async def _prefetch_queued_eventforge_loras(
+    http: aiohttp.ClientSession,
+    args: argparse.Namespace,
+    state: dict,
+    ef_base: str,
+    worker_key: str,
+) -> tuple[int, int]:
+    """Download validated LoRAs for queued jobs before this worker can claim them."""
+    caps = resolve_capabilities(args.hostname)
+    params = {
+        "hostname": args.hostname,
+        "capabilities": ",".join(caps),
+        "limit": "64",
+    }
+    headers = {"Authorization": f"Bearer {worker_key}"}
+    async with http.get(
+        f"{ef_base}/v1/workers/loras/needed",
+        params=params,
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=60),
+    ) as resp:
+        if resp.status == 404:
+            # Rolling deploy compatibility: old servers do not expose prefetch.
+            return 0, 0
+        if resp.status != 200:
+            raise RuntimeError(f"EventForge LoRA prefetch catalog HTTP {resp.status}")
+        body = await resp.json()
+
+    rows = body.get("loras") if isinstance(body, dict) else []
+    if not isinstance(rows, list):
+        return 0, 0
+
+    pulled = 0
+    failed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        job_id = str(row.get("job_id") or "").strip()
+        file_name = _normalize_lora_basename(str(row.get("file_name") or ""))
+        if not job_id or not file_name or worker_has_lora(state, file_name):
+            continue
+        remove_invalid_lora_files([file_name])
+        path = await asyncio.to_thread(
+            pull_missing_loras_from_eventforge,
+            args,
+            job_id,
+            [file_name],
+            ef_base=ef_base,
+            worker_key=worker_key,
+        )
+        if path:
+            pulled += 1
+            await _sync_lora_inventory(state, args)
+        else:
+            failed += 1
+
+    return pulled, failed
+
+
+async def ef_lora_sync_loop(
+    http: aiohttp.ClientSession,
+    args: argparse.Namespace,
+    state: dict,
+    ef_base: str,
+    worker_key: str,
+) -> None:
+    """Continuously reconcile queued EF and hub LoRAs whenever this box is idle."""
+    interval = max(60, int(os.environ.get("LOBO_LORA_SYNC_INTERVAL", "300")))
     while True:
         if agent.agent_fleet_busy(state):
             await asyncio.sleep(30.0)
             continue
         mode = resolve_lora_sync_mode(args.hostname)
+        sleep_for = interval
         try:
+            ef_pulled = 0
+            ef_failed = 0
+            try:
+                ef_pulled, ef_failed = await _prefetch_queued_eventforge_loras(
+                    http, args, state, ef_base, worker_key,
+                )
+            except Exception as ex:
+                # EventForge catalog trouble must not suppress the independent
+                # hub reconciliation path.
+                ef_failed = 1
+                log.warning("Queued EventForge LoRA prefetch failed: %s", ex)
             result = await asyncio.to_thread(sync_hub_active_loras, args, mode)
             await _sync_lora_inventory(state, args)
+            failed = ef_failed + int(result.get("failed") or 0)
+            if failed:
+                # Informational only — the box keeps serving jobs it CAN do
+                # (server routes LoRA jobs by known_loras); retry sooner.
+                state["claim_paused_reason"] = (
+                    f"Idle LoRA sync incomplete: {failed} download(s) failed"
+                )
+                sleep_for = min(interval, 60)
+            elif str(state.get("claim_paused_reason") or "").startswith(
+                ("Periodic LoRA sync", "Idle LoRA sync")
+            ):
+                state.pop("claim_paused_reason", None)
             log.info(
-                "Periodic LoRA sync host=%s mode=%s pulled=%s skipped=%s known=%d",
+                "Idle LoRA sync host=%s mode=%s ef_pulled=%s hub_pulled=%s skipped=%s failed=%s known=%d",
                 args.hostname,
                 mode,
+                ef_pulled,
                 result.get("pulled"),
                 result.get("skipped"),
+                failed,
                 len(state.get("known_loras") or []),
             )
         except Exception as ex:
-            log.warning("Periodic LoRA sync failed host=%s mode=%s: %s", args.hostname, mode, ex)
-        await asyncio.sleep(interval)
+            log.warning("Idle LoRA sync failed host=%s mode=%s: %s", args.hostname, mode, ex)
+            sleep_for = min(interval, 60)
+        await asyncio.sleep(sleep_for)
 
 
 async def ef_claim_ready_reconcile_loop(
@@ -739,7 +966,7 @@ async def run_ef_agent(args: argparse.Namespace) -> None:
         tasks = [
             ef_consumer_loop(capabilities, args, agent_state, http, ef_base, worker_key),
             sqs_lora_prefetch_loop(http, args, agent_state),
-            ef_lora_sync_loop(args, agent_state),
+            ef_lora_sync_loop(http, args, agent_state, ef_base, worker_key),
             ef_api_check_in_loop(http, args, agent_state, ef_base, worker_key),
             ef_claim_ready_reconcile_loop(args, agent_state),
             agent.comfy_watchdog(args, agent_state, NoopSession()),

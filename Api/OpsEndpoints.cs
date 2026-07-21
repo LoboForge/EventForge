@@ -712,12 +712,11 @@ public static class OpsEndpoints
             if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
                 return Results.Unauthorized();
             var allJobs = queue.SnapshotJobs();
-            var knownApps = allJobs.Select(j => j.AppId).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            foreach (var id in knownApps)
-            {
-                if (apps.Get(id) == null && !apps.IsPaused(id))
-                    continue;
-            }
+            var knownApps = allJobs.Select(j => j.AppId)
+                .Concat(apps.ListAll().Select(s => s.AppId))
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
             var rows = knownApps.Select(appId =>
             {
                 var jobs = allJobs.Where(j => string.Equals(j.AppId, appId, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -728,6 +727,7 @@ public static class OpsEndpoints
                     paused = apps.IsPaused(appId),
                     pause_reason = state?.PauseReason,
                     paused_at = state?.PausedAtUtc?.ToString("O"),
+                    random_bulk = apps.IsRandomBulk(appId),
                     jobs_queued = jobs.Count(j => j.Status == JobStatus.Queued),
                     jobs_in_progress = jobs.Count(j => j.Status is JobStatus.Leased or JobStatus.Streaming),
                     jobs_failed = jobs.Count(j => j.Status == JobStatus.Failed),
@@ -735,6 +735,26 @@ public static class OpsEndpoints
                 };
             }).OrderBy(r => r.app_id).ToList();
             return Results.Ok(new { apps = rows });
+        });
+
+        app.MapPost("/v1/ops/apps/{appId}/random-bulk", (
+            HttpContext ctx,
+            string appId,
+            RandomBulkAppBody? body,
+            ConsumerAppRegistry apps,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(appId))
+                return Results.BadRequest(new { error = "app_id required" });
+            var enabled = body?.Enabled ?? body?.RandomBulk ?? false;
+            var state = apps.SetRandomBulk(appId, enabled);
+            return Results.Ok(new
+            {
+                app_id = state.AppId,
+                random_bulk = state.RandomBulk,
+            });
         });
 
         app.MapPost("/v1/ops/apps/{appId}/pause", (
@@ -837,6 +857,7 @@ public static class OpsEndpoints
                 {
                     app_id = g.Key,
                     paused = apps?.IsPaused(g.Key) ?? false,
+                    random_bulk = apps?.IsRandomBulk(g.Key) ?? false,
                     queued = g.Count(j => j.Status == JobStatus.Queued),
                     in_progress = g.Count(j => j.Status is JobStatus.Leased or JobStatus.Streaming),
                     failed = g.Count(j => j.Status == JobStatus.Failed),
@@ -1077,6 +1098,13 @@ public sealed class PauseAppBody
     public string? PausedBy { get; set; }
     /// <summary>Override maintenance_* guard; required to intentionally pause uploads for a maintenance reason.</summary>
     public bool Force { get; set; }
+}
+
+public sealed class RandomBulkAppBody
+{
+    public bool? Enabled { get; set; }
+    [JsonPropertyName("random_bulk")]
+    public bool? RandomBulk { get; set; }
 }
 
 public sealed class QuarantineWorkerBody

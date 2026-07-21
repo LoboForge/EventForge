@@ -148,7 +148,7 @@ if aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region
   step "Updating existing ${SERVICE} service"
   aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$TASK_ARN" \
     --desired-count 1 --availability-zone-rebalancing DISABLED \
-    --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}" \
+    --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" \
     --force-new-deployment --region "$REGION" >/dev/null
 else
   step "Creating ${SERVICE} service (desiredCount=1)"
@@ -159,7 +159,7 @@ else
     --desired-count 1 \
     --launch-type FARGATE \
     --availability-zone-rebalancing DISABLED \
-    --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100,deploymentCircuitBreaker={enable=true,rollback=true}" \
+    --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" \
     --network-configuration "awsvpcConfiguration={subnets=[${SUBNET}],securityGroups=[${TASK_SG}],assignPublicIp=ENABLED}" \
     --region "$REGION" >/dev/null
 fi

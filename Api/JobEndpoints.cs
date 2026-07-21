@@ -81,7 +81,25 @@ public static class JobEndpoints
                 var tier = root.TryGetProperty("tier", out var t) ? t.GetString() ?? "*" : "*";
                 job = await jobs.ClaimAsync(capability, tier, workerId, workerHostname, ct);
             }
-            if (job == null) return Results.NoContent();
+            if (job == null)
+            {
+                var diagnostics = jobs.GetClaimDiagnostics(
+                    workerHostname,
+                    root.TryGetProperty("capability", out var diagnosticCap) ? diagnosticCap.GetString() : null,
+                    root.TryGetProperty("tier", out var diagnosticTier) ? diagnosticTier.GetString() : null);
+                ctx.Response.Headers["X-EventForge-Queued-Matching"] = diagnostics.QueuedMatching.ToString();
+                ctx.Response.Headers["X-EventForge-Blocked-Paused"] = diagnostics.BlockedPaused.ToString();
+                ctx.Response.Headers["X-EventForge-Blocked-Model"] = diagnostics.BlockedModel.ToString();
+                ctx.Response.Headers["X-EventForge-Blocked-Lora"] = diagnostics.BlockedLora.ToString();
+                if (diagnostics.MissingLoras.Count > 0)
+                {
+                    // Keep headers bounded; this is a recovery hint, not the source of truth.
+                    var names = string.Join(",", diagnostics.MissingLoras.Take(12));
+                    ctx.Response.Headers["X-EventForge-Missing-Loras"] =
+                        names.Length <= 1024 ? names : names[..1024];
+                }
+                return Results.NoContent();
+            }
             return Results.Ok(new
             {
                 job_id = job.JobId,

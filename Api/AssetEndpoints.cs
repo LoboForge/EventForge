@@ -169,6 +169,35 @@ public static class AssetEndpoints
             return ok ? Results.Ok(new { ok = true, asset_id = assetId }) : Results.NotFound();
         });
 
+        // Worker: discover ready EventForge LoRAs needed by queued jobs before
+        // claiming them. A worker is not claim-eligible until its next check-in
+        // advertises the successfully downloaded file in known_loras.
+        app.MapGet("/v1/workers/loras/needed", (
+            HttpContext ctx,
+            IWorkerKeyValidator auth,
+            JobService jobs,
+            string? hostname,
+            string? capabilities,
+            int? limit) =>
+        {
+            if (!AuthHelpers.TryReadApiKey(ctx, out var token) || !auth.TryValidate(token, out _))
+                return Results.Unauthorized();
+
+            var caps = (capabilities ?? "")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var items = jobs.GetQueuedLorasForPrefetch(hostname, caps, limit ?? 64)
+                .Select(item => new
+                {
+                    job_id = item.JobId,
+                    file_name = item.FileName,
+                    bytes = item.Bytes,
+                    sha256 = item.Sha256,
+                    download_url = $"/v1/jobs/{Uri.EscapeDataString(item.JobId)}/loras/{Uri.EscapeDataString(item.FileName)}",
+                })
+                .ToList();
+            return Results.Ok(new { count = items.Count, loras = items });
+        });
+
         // Worker: download a ready LoRA referenced by a job (app-scoped via job.AppId).
         app.MapGet("/v1/jobs/{jobId}/loras/{fileName}", async (
             string jobId,

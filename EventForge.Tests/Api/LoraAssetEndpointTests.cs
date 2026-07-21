@@ -102,6 +102,76 @@ public sealed class LoraAssetEndpointTests : IClassFixture<LoraAssetWebApplicati
             jobResp.StatusCode.Should().Be(HttpStatusCode.OK);
         }
 
+        var workerSuffix = Guid.NewGuid().ToString("N");
+        var hostname = $"loboforge-image-{workerSuffix}";
+        async Task CheckInAsync(bool hasLora)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, "/v1/workers/check-in")
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(new
+                    {
+                        node_uuid = workerSuffix,
+                        hostname,
+                        transport = "eventforge",
+                        forge_queue_capabilities = new[] { "flux-klein" },
+                        claim_ready_capabilities = new[] { "flux-klein" },
+                        known_loras = hasLora ? new[] { fileName } : Array.Empty<string>(),
+                        models = new
+                        {
+                            unets = new[] { "flux-klein-test.safetensors" },
+                            loras = hasLora ? new[] { fileName } : Array.Empty<string>(),
+                        },
+                    }),
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrath-worker-key");
+            using var resp = await _client.SendAsync(req);
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+
+        await CheckInAsync(hasLora: false);
+
+        // A ready server asset is offered for proactive idle prefetch, but is
+        // deliberately NOT enough to lease the job. The worker must first
+        // check in with the validated file in known_loras.
+        using (var neededReq = new HttpRequestMessage(
+                   HttpMethod.Get,
+                   $"/v1/workers/loras/needed?hostname={hostname}&capabilities=flux-klein"))
+        {
+            neededReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrath-worker-key");
+            using var neededResp = await _client.SendAsync(neededReq);
+            neededResp.StatusCode.Should().Be(HttpStatusCode.OK);
+            using var neededDoc = JsonDocument.Parse(await neededResp.Content.ReadAsStringAsync());
+            var needed = neededDoc.RootElement.GetProperty("loras").EnumerateArray().ToList();
+            needed.Should().ContainSingle();
+            needed[0].GetProperty("job_id").GetString().Should().Be(jobId);
+            needed[0].GetProperty("file_name").GetString().Should().Be(fileName);
+        }
+
+        async Task<HttpStatusCode> ClaimAsync()
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, "/v1/jobs/claim")
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(new
+                    {
+                        hostname,
+                        capabilities = new[] { "flux-klein" },
+                    }),
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrath-worker-key");
+            using var resp = await _client.SendAsync(req);
+            return resp.StatusCode;
+        }
+
+        (await ClaimAsync()).Should().Be(HttpStatusCode.NoContent);
+        await CheckInAsync(hasLora: true);
+        (await ClaimAsync()).Should().Be(HttpStatusCode.OK);
+
         using (var dlReq = new HttpRequestMessage(HttpMethod.Get, $"/v1/jobs/{jobId}/loras/{fileName}"))
         {
             dlReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrath-worker-key");

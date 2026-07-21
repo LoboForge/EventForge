@@ -606,6 +606,25 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
     }
   }
 
+  async function setRandomBulk(appId: string, enabled: boolean) {
+    setBusy(`random:${appId}`)
+    setErr(null)
+    try {
+      await opsFetch(`/v1/ops/apps/${encodeURIComponent(appId)}/random-bulk`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      })
+      setMsg(enabled
+        ? `Random bulk claim enabled for ${appId}`
+        : `FIFO bulk claim restored for ${appId}`)
+      onRefresh()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <div className="card">
       {msg && <div className="success">{msg}</div>}
@@ -613,7 +632,7 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
       <div className="card-head">
         <div>
           <h2>Consumer apps</h2>
-          <p className="muted card-sub">Pause blocks all job enqueue (HTTP 402) for billing/quota holds — not for broken workers. Quarantine a box on the Fleet tab instead. Purge queued work per app.</p>
+          <p className="muted card-sub">Pause blocks all job enqueue (HTTP 402) for billing/quota holds — not for broken workers. Quarantine a box on the Fleet tab instead. Random bulk picks a random job within the bulk tier (priority tiers still win). Purge queued work per app.</p>
         </div>
       </div>
       <SortableTable
@@ -672,6 +691,15 @@ function AppsTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void
             sortable: false,
             render: (a) => (
               <div className="actions-cell">
+                <label className="checkbox-inline" title="When checked, bulk-tier jobs for this app are claimed in random order instead of FIFO. Admin/vip/normal still take priority.">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(a.random_bulk)}
+                    disabled={busy === `random:${a.app_id}`}
+                    onChange={(e) => void setRandomBulk(a.app_id, e.target.checked)}
+                  />
+                  <span>Random bulk</span>
+                </label>
                 {a.paused
                   ? <button className="btn secondary small" disabled={busy === `unpause:${a.app_id}`} onClick={() => void unpause(a.app_id)}>Unpause</button>
                   : <button className="btn warn small" disabled={busy === `pause:${a.app_id}`} onClick={() => void pause(a.app_id)}>Pause</button>}
@@ -891,8 +919,13 @@ export default function OpsApp() {
 
   const nonContrib = snapshot?.fleet.workers_non_contributing ?? workers.filter((w) => w.badges.length > 0).length
   const appRows = apps.length ? apps : (snapshot?.queue_by_app ?? []).map((a) => ({
-    app_id: a.app_id, paused: a.paused, jobs_queued: a.queued, jobs_in_progress: a.in_progress,
-    jobs_failed: a.failed, jobs_completed: a.completed,
+    app_id: a.app_id,
+    paused: a.paused,
+    random_bulk: a.random_bulk,
+    jobs_queued: a.queued,
+    jobs_in_progress: a.in_progress,
+    jobs_failed: a.failed,
+    jobs_completed: a.completed,
   }))
 
   return (

@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 
 namespace EventForge.Services;
 
-/// <summary>Per-consumer app state (pause when out of generations, etc.).</summary>
+/// <summary>Per-consumer app state (pause when out of generations, claim ordering, etc.).</summary>
 public sealed class ConsumerAppRegistry
 {
     private readonly ConcurrentDictionary<string, AppState> _apps = new(StringComparer.OrdinalIgnoreCase);
@@ -11,6 +11,12 @@ public sealed class ConsumerAppRegistry
     {
         if (string.IsNullOrWhiteSpace(appId)) return false;
         return _apps.TryGetValue(appId.Trim(), out var s) && s.Paused;
+    }
+
+    public bool IsRandomBulk(string appId)
+    {
+        if (string.IsNullOrWhiteSpace(appId)) return false;
+        return _apps.TryGetValue(appId.Trim(), out var s) && s.RandomBulk;
     }
 
     public AppState? Get(string appId)
@@ -56,6 +62,23 @@ public sealed class ConsumerAppRegistry
         s.UnpausedAtUtc = DateTimeOffset.UtcNow;
         return s;
     }
+
+    /// <summary>
+    /// When enabled, claim selection among this app's <c>bulk</c> jobs (same
+    /// queue_priority) is random instead of FIFO. Higher tiers still win.
+    /// </summary>
+    public AppState SetRandomBulk(string appId, bool enabled)
+    {
+        var id = appId.Trim();
+        return _apps.AddOrUpdate(
+            id,
+            _ => new AppState { AppId = id, RandomBulk = enabled },
+            (_, existing) =>
+            {
+                existing.RandomBulk = enabled;
+                return existing;
+            });
+    }
 }
 
 public sealed class AppState
@@ -66,4 +89,6 @@ public sealed class AppState
     public DateTimeOffset? PausedAtUtc { get; set; }
     public DateTimeOffset? UnpausedAtUtc { get; set; }
     public string? PausedBy { get; set; }
+    /// <summary>Claim randomly among this app's bulk-tier jobs (priority still applies).</summary>
+    public bool RandomBulk { get; set; }
 }

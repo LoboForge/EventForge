@@ -93,7 +93,7 @@ Requires `secrets.local.json` with `EventForge.VastAi.ApiKey` and worker key, or
 
 1. **Single ECS task only** — in-memory job queue. `desiredCount` must stay `1`.
 2. **Production — never scale to zero.** `desiredCount=0` takes https://eventforge.loboforge.com fully offline (real customer jobs). To restart, use `--desired-count 1 --force-new-deployment` (see `AGENTS.md`).
-3. **No overlapping tasks during deploy** — service uses `minimumHealthyPercent=0`, `maximumPercent=100`, AZ rebalancing disabled.
+3. **Zero-downtime roll** — `minimumHealthyPercent=100`, `maximumPercent=200`: the new task becomes healthy before the old one is drained. Pre-deploy persist (`flush-backup`) copies the queue to S3 so the replacement loads state. AZ rebalancing disabled.
 4. **Circuit breaker** — failed deploys roll back automatically.
 5. **Monorepo must not deploy EventForge** — LoboForge.Studio CI should skip ECS roll for `eventforge` service.
 6. **Pre-deploy persist** — CodeBuild/`eventforge-ecs-deploy.sh` calls `scripts/eventforge-pre-deploy-persist.sh`, which hits `POST /v1/ops/jobs/flush-backup`. That path hot-copies SQLite under `/tmp` then uploads to S3. If it reports `backup_skipped` with thousands of jobs, **do not** roll ECS until backup succeeds (or you have verified a fresh S3 `event-forge/store.db`). Never set `desiredCount=0` to work around a bad backup.

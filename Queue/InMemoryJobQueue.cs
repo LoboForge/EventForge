@@ -95,11 +95,20 @@ public sealed class InMemoryJobQueue
         }
     }
 
-    public JobRecord? TryClaim(string capability, string tier, string workerId, string? workerHostname, TimeSpan lease, Func<JobRecord, bool>? canClaim = null)
+    public JobRecord? TryClaim(
+        string capability,
+        string tier,
+        string workerId,
+        string? workerHostname,
+        TimeSpan lease,
+        Func<JobRecord, bool>? canClaim = null,
+        Func<string, bool>? isRandomBulkApp = null,
+        Random? rng = null)
     {
         lock (_lock)
         {
             RequeueExpiredLocked(DateTimeOffset.UtcNow);
+            var matches = new List<(JobRecord Job, int Index)>();
             for (var i = 0; i < _queuedOrder.Count; i++)
             {
                 var id = _queuedOrder[i];
@@ -107,10 +116,13 @@ public sealed class InMemoryJobQueue
                 if (job.Status != JobStatus.Queued) continue;
                 if (!CapabilityMatches(job, capability, tier)) continue;
                 if (canClaim != null && !canClaim(job)) continue;
-
-                return LeaseJobLocked(job, workerId, workerHostname, lease, i);
+                matches.Add((job, i));
             }
-            return null;
+
+            if (matches.Count == 0) return null;
+
+            var pick = SelectClaimCandidate(matches, isRandomBulkApp, rng);
+            return LeaseJobLocked(pick.Job, workerId, workerHostname, lease, pick.Index);
         }
     }
 
@@ -119,7 +131,9 @@ public sealed class InMemoryJobQueue
         string workerId,
         string? workerHostname,
         TimeSpan lease,
-        Func<JobRecord, bool>? canClaim = null)
+        Func<JobRecord, bool>? canClaim = null,
+        Func<string, bool>? isRandomBulkApp = null,
+        Random? rng = null)
     {
         lock (_lock)
         {
@@ -129,9 +143,7 @@ public sealed class InMemoryJobQueue
                 StringComparer.OrdinalIgnoreCase);
             if (capSet.Count == 0) return null;
 
-            JobRecord? bestJob = null;
-            var bestIndex = -1;
-
+            var matches = new List<(JobRecord Job, int Index)>();
             for (var i = 0; i < _queuedOrder.Count; i++)
             {
                 var id = _queuedOrder[i];
@@ -139,17 +151,48 @@ public sealed class InMemoryJobQueue
                 if (job.Status != JobStatus.Queued) continue;
                 if (!capSet.Contains(job.Capability)) continue;
                 if (canClaim != null && !canClaim(job)) continue;
-
-                if (bestJob == null || JobQueueOrdering.CompareForClaim(job, bestJob) < 0)
-                {
-                    bestJob = job;
-                    bestIndex = i;
-                }
+                matches.Add((job, i));
             }
 
-            if (bestJob == null || bestIndex < 0) return null;
-            return LeaseJobLocked(bestJob, workerId, workerHostname, lease, bestIndex);
+            if (matches.Count == 0) return null;
+
+            var pick = SelectClaimCandidate(matches, isRandomBulkApp, rng);
+            return LeaseJobLocked(pick.Job, workerId, workerHostname, lease, pick.Index);
         }
+    }
+
+    /// <summary>
+    /// Priority tiers + queue_priority first (admin→vip→normal→bulk). When the
+    /// winning job is <c>bulk</c> for an app with random-bulk enabled, pick
+    /// uniformly among that app's claimable bulk jobs at the same priority.
+    /// </summary>
+    private static (JobRecord Job, int Index) SelectClaimCandidate(
+        List<(JobRecord Job, int Index)> matches,
+        Func<string, bool>? isRandomBulkApp,
+        Random? rng)
+    {
+        var best = matches[0];
+        for (var i = 1; i < matches.Count; i++)
+        {
+            if (JobQueueOrdering.CompareForClaim(matches[i].Job, best.Job) < 0)
+                best = matches[i];
+        }
+
+        if (isRandomBulkApp == null
+            || !string.Equals(best.Job.Tier, "bulk", StringComparison.OrdinalIgnoreCase)
+            || !isRandomBulkApp(best.Job.AppId))
+            return best;
+
+        var peers = matches
+            .Where(m =>
+                string.Equals(m.Job.AppId, best.Job.AppId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(m.Job.Tier, "bulk", StringComparison.OrdinalIgnoreCase)
+                && JobQueueOrdering.EffectivePriority(m.Job) == JobQueueOrdering.EffectivePriority(best.Job))
+            .ToList();
+        if (peers.Count <= 1) return best;
+
+        var pickRng = rng ?? Random.Shared;
+        return peers[pickRng.Next(peers.Count)];
     }
 
     private JobRecord LeaseJobLocked(
