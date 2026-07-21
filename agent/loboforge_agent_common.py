@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import logging
 from pathlib import Path
@@ -429,29 +430,49 @@ def sync_hub_active_loras(args: argparse.Namespace, mode: str | None = None) -> 
         if rel.lower().startswith("loras/"):
             rel = rel[6:]
         dest = root / "loras" / Path(rel).name
-        if dest.is_file() and dest.stat().st_size > min_bytes:
+        # Re-download when the on-disk file is missing OR fails validation
+        # (truncated/corrupt safetensors). "exists and > 1 MB" is NOT success.
+        if _lora_file_valid(dest, min_bytes=min_bytes):
             skipped += 1
             continue
+        tmp = dest.with_suffix(dest.suffix + ".partial")
         try:
             if "drive.google.com" in su or "docs.google.com" in su:
                 import gdown
-                gdown.download(su, str(dest), quiet=True, fuzzy=True)
-                if dest.is_file() and dest.stat().st_size > min_bytes:
+                gdown.download(su, str(tmp), quiet=True, fuzzy=True)
+                if _finalize_downloaded_lora(tmp, dest, min_bytes=min_bytes):
                     pulled += 1
                     log.info("Pulled LoRA %s (gdown)", dest.name)
-                    continue
+                else:
+                    failed += 1
+                    log.warning("LoRA %s failed validation after gdown", dest.name)
+                continue
             dl_req = urllib.request.Request(su, headers={"User-Agent": "LoboForge-Worker/1.1"})
             with urllib.request.urlopen(dl_req, timeout=300) as dl_resp:
+                declared = int(dl_resp.headers.get("Content-Length", 0) or 0)
                 data = dl_resp.read()
-            if len(data) < min_bytes:
+            if declared and len(data) != declared:
                 failed += 1
+                log.warning(
+                    "LoRA %s truncated: got %d bytes, Content-Length %d",
+                    dest.name, len(data), declared,
+                )
                 continue
-            dest.write_bytes(data)
-            pulled += 1
-            log.info("Pulled LoRA %s", dest.name)
+            tmp.write_bytes(data)
+            if _finalize_downloaded_lora(tmp, dest, min_bytes=min_bytes):
+                pulled += 1
+                log.info("Pulled LoRA %s (%d bytes)", dest.name, len(data))
+            else:
+                failed += 1
+                log.warning("LoRA %s failed validation after download", dest.name)
         except Exception as ex:
             failed += 1
             log.warning("LoRA download failed %s: %s", dest.name, ex)
+            try:
+                if tmp.is_file():
+                    tmp.unlink()
+            except OSError:
+                pass
 
     result = {"mode": sync_mode, "pulled": pulled, "skipped": skipped, "failed": failed, "source": "active-loras"}
     log.info("LoRA sync (inline) mode=%s pulled=%s skipped=%s failed=%s", sync_mode, pulled, skipped, failed)
@@ -486,8 +507,9 @@ def download_eventforge_job_lora(
         return None
     dest = root / "loras" / safe
     dest.parent.mkdir(parents=True, exist_ok=True)
-    min_bytes = 1_000_000
-    if dest.is_file() and dest.stat().st_size >= min_bytes:
+    min_bytes = LORA_MIN_BYTES
+    # Keep a valid on-disk copy, but re-fetch a truncated/corrupt one.
+    if _lora_file_valid(dest, min_bytes=min_bytes):
         return dest
 
     import urllib.error
@@ -504,6 +526,7 @@ def download_eventforge_job_lora(
     )
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
+            declared = int(resp.headers.get("Content-Length", 0) or 0)
             data = resp.read()
     except urllib.error.HTTPError as ex:
         if ex.code == 404:
@@ -517,10 +540,15 @@ def download_eventforge_job_lora(
     if len(data) < min_bytes:
         log.warning("EventForge LoRA %s too small (%d bytes)", safe, len(data))
         return None
+    if declared and len(data) != declared:
+        log.warning(
+            "EventForge LoRA %s truncated: got %d bytes, Content-Length %d",
+            safe, len(data), declared,
+        )
+        return None
     tmp = dest.with_suffix(dest.suffix + ".partial")
     try:
         tmp.write_bytes(data)
-        tmp.replace(dest)
     except OSError as ex:
         if tmp.is_file():
             try:
@@ -529,6 +557,9 @@ def download_eventforge_job_lora(
                 pass
         log.warning("EventForge LoRA write failed for %s: %s", safe, ex)
         raise
+    if not _finalize_downloaded_lora(tmp, dest, min_bytes=min_bytes):
+        log.warning("EventForge LoRA %s failed validation after download", safe)
+        return None
     log.info("Pulled EventForge LoRA %s (%d bytes) for job %s", safe, len(data), job_id[:8])
     return dest
 
@@ -631,12 +662,21 @@ def pull_missing_loras_from_loboforge(
         try:
             req = urllib.request.Request(su, headers={"User-Agent": "LoboForge-Worker/1.1"})
             with urllib.request.urlopen(req, timeout=600) as resp:
+                declared = int(resp.headers.get("Content-Length", 0) or 0)
                 data = resp.read()
             if len(data) < min_bytes:
                 log.warning("LoboForge LoRA %s too small (%d bytes)", basename, len(data))
                 continue
+            if declared and len(data) != declared:
+                log.warning(
+                    "LoboForge LoRA %s truncated: got %d bytes, Content-Length %d",
+                    basename, len(data), declared,
+                )
+                continue
             tmp.write_bytes(data)
-            tmp.replace(dest)
+            if not _finalize_downloaded_lora(tmp, dest, min_bytes=min_bytes):
+                log.warning("LoboForge LoRA %s failed validation after download", basename)
+                continue
             pulled.append(_normalize_lora_basename(basename))
             log.info("Pulled LoboForge LoRA %s (%d bytes)", dest.name, len(data))
         except Exception as ex:
@@ -648,6 +688,114 @@ def pull_missing_loras_from_loboforge(
                     pass
     return pulled
 
+
+
+LORA_MIN_BYTES = 1_000_000
+
+
+def _safetensors_appears_valid(path: Path) -> bool:
+    """Cheap structural check that a ``.safetensors`` file is complete.
+
+    Reads only the 8-byte length prefix + JSON header (never the tensor data, so
+    it stays fast and touches no image/model content). A truncated file — e.g. a
+    208 MB partial of a larger checkpoint — is rejected because the header's
+    largest ``data_offsets`` end exceeds the bytes actually on disk. This is the
+    root-cause guard: a >1 MB partial must NOT be treated as "already present".
+
+    Returns True when the header parses and the file is at least as large as the
+    header requires; False on any truncation/corruption.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size < 8:
+        return False
+    try:
+        with open(path, "rb") as f:
+            prefix = f.read(8)
+            if len(prefix) != 8:
+                return False
+            header_len = int.from_bytes(prefix, "little", signed=False)
+            # Header must be sane and fit inside the file (cap at 100 MB).
+            if header_len <= 0 or header_len > 100 * 1024 * 1024:
+                return False
+            if 8 + header_len > size:
+                return False
+            header_bytes = f.read(header_len)
+            if len(header_bytes) != header_len:
+                return False
+    except OSError:
+        return False
+    try:
+        header = json.loads(header_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(header, dict):
+        return False
+    max_end = 0
+    for name, meta in header.items():
+        if name == "__metadata__" or not isinstance(meta, dict):
+            continue
+        offsets = meta.get("data_offsets")
+        if isinstance(offsets, (list, tuple)) and len(offsets) == 2:
+            try:
+                end = int(offsets[1])
+            except (TypeError, ValueError):
+                continue
+            if end > max_end:
+                max_end = end
+    # Total file must contain the full data region the header describes.
+    return size >= 8 + header_len + max_end
+
+
+def _finalize_downloaded_lora(tmp: Path, dest: Path, *, min_bytes: int = LORA_MIN_BYTES) -> bool:
+    """Promote a freshly-downloaded temp file to ``dest`` atomically, but only if
+    it passes size + (for safetensors) header/truncation validation. Validation
+    keys off the *final* name because the temp usually ends in ``.partial``.
+    Removes the temp on failure. Returns True when ``dest`` holds a valid file.
+    """
+    try:
+        ok = tmp.is_file() and tmp.stat().st_size >= min_bytes
+        if ok and dest.suffix.lower() == ".safetensors":
+            ok = _safetensors_appears_valid(tmp)
+    except OSError:
+        ok = False
+    if not ok:
+        try:
+            if tmp.is_file():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+    try:
+        tmp.replace(dest)
+        return True
+    except OSError:
+        try:
+            if tmp.is_file():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _lora_file_valid(path: Path, *, min_bytes: int = LORA_MIN_BYTES) -> bool:
+    """A LoRA on disk is usable only if it clears the size floor AND, for
+    safetensors, has an intact (non-truncated) header/data region.
+
+    This replaces the old "exists and > 1 MB ⇒ success" logic that let a
+    truncated 208 MB ``wan2.2_pt_nude_ls_high_noise.safetensors`` survive and
+    repeatedly crash Comfy with SafetensorError.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size < min_bytes:
+            return False
+    except OSError:
+        return False
+    if path.suffix.lower() == ".safetensors":
+        return _safetensors_appears_valid(path)
+    return True
 
 
 def _normalize_lora_basename(raw: str) -> str:
@@ -721,13 +869,15 @@ def _lora_on_disk(lora_name: str, *, min_bytes: int = 1_000_000) -> bool:
             continue
         for candidate in (d / target, d / lora_name):
             try:
-                if candidate.is_file() and candidate.stat().st_size >= min_bytes:
+                if _lora_file_valid(candidate, min_bytes=min_bytes):
                     return True
             except OSError:
                 continue
+        # Comfy indexes loras/ recursively (subfolders like Wan2.2/, F2Klein/) —
+        # presence check must match that or we re-download files we already have.
         try:
-            for f in d.glob("*.safetensors"):
-                if _lora_basenames_match(f.name, target) and f.stat().st_size >= min_bytes:
+            for f in d.rglob("*.safetensors"):
+                if _lora_basenames_match(f.name, target) and _lora_file_valid(f, min_bytes=min_bytes):
                     return True
         except OSError:
             continue

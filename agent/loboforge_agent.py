@@ -206,6 +206,47 @@ def get_disk_free_mb(path: str = "/") -> int:
         return -1
 
 
+def safetensors_appears_valid(path: Path) -> bool:
+    """Structural completeness check for a .safetensors file (header only).
+
+    Rejects truncated files — the header's largest data_offsets end must fit
+    within the bytes on disk. Reads only the 8-byte prefix + JSON header, never
+    tensor/image data. Returns True on any non-safetensors path so callers can
+    gate only safetensors. False means truncated/corrupt → re-download.
+    """
+    try:
+        size = path.stat().st_size
+        if size < 8:
+            return False
+        with open(path, "rb") as f:
+            prefix = f.read(8)
+            if len(prefix) != 8:
+                return False
+            header_len = int.from_bytes(prefix, "little", signed=False)
+            if header_len <= 0 or header_len > 100 * 1024 * 1024 or 8 + header_len > size:
+                return False
+            header_bytes = f.read(header_len)
+            if len(header_bytes) != header_len:
+                return False
+        header = json.loads(header_bytes.decode("utf-8"))
+        if not isinstance(header, dict):
+            return False
+        max_end = 0
+        for name, meta in header.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            offsets = meta.get("data_offsets")
+            if isinstance(offsets, (list, tuple)) and len(offsets) == 2:
+                try:
+                    end = int(offsets[1])
+                except (TypeError, ValueError):
+                    continue
+                max_end = max(max_end, end)
+        return size >= 8 + header_len + max_end
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+
+
 _LOAD_IO_CLASSES = frozenset({
     "LoadImage", "LoadImageMask", "LoadVideo", "VHS_LoadVideo", "VHS_LoadAudio",
     "LoadAudio", "ImageLoad", "LoadImageSequence",
@@ -1721,10 +1762,14 @@ def _model_available(available: list[str], current: str) -> bool:
         return False
     cur = current.strip()
     base = _model_basename(cur)
+    base_l = base.lower()
+    cur_l = cur.lower()
     for name in available:
-        if name == cur:
+        if name == cur or name.lower() == cur_l:
             return True
-        if _model_basename(name) == base:
+        # Comfy inventory paths are case-sensitive; job graphs often use
+        # mismatched casing (…_LOW.safetensors vs …_low.safetensors).
+        if _model_basename(name).lower() == base_l:
             return True
     return False
 
@@ -1732,9 +1777,13 @@ def _model_available(available: list[str], current: str) -> bool:
 def _resolve_comfy_model_name(available: list[str], pick: str) -> str:
     if pick in available:
         return pick
-    base = _model_basename(pick)
+    pick_l = pick.lower()
     for name in available:
-        if _model_basename(name) == base:
+        if name.lower() == pick_l:
+            return name
+    base_l = _model_basename(pick).lower()
+    for name in available:
+        if _model_basename(name).lower() == base_l:
             return name
     return pick
 
@@ -2626,14 +2675,22 @@ async def handle_download_model(ws, msg: dict, args) -> None:
     abs_path = models_root / dest_path
     abs_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Keep LoRAs on disk — re-downloading wastes S3 egress. Skip when present.
+    # Keep LoRAs on disk — re-downloading wastes S3 egress. Skip when present
+    # AND intact: a truncated/corrupt safetensors must be re-fetched, not kept.
     min_keep_bytes = 1024 * 1024
     if model_type == "lora" and abs_path.exists():
         try:
             size = abs_path.stat().st_size
         except OSError:
             size = 0
-        if size >= min_keep_bytes:
+        intact = size >= min_keep_bytes and (
+            abs_path.suffix.lower() != ".safetensors" or safetensors_appears_valid(abs_path)
+        )
+        if size >= min_keep_bytes and not intact:
+            log.warning(
+                f"LoRA on disk is truncated/corrupt ({size:,} bytes), re-downloading: {abs_path}"
+            )
+        if intact:
             log.info(f"LoRA already on disk ({size:,} bytes), skipping download: {abs_path}")
             updated_models = await get_available_models(args.comfyui_http)
             await ws.send(json.dumps({
@@ -2747,7 +2804,10 @@ async def handle_download_model(ws, msg: dict, args) -> None:
                 downloaded = 0
                 last_pct   = -1
 
-                with open(abs_path, "wb") as f:
+                # Stream to a .partial then validate + atomically promote, so a
+                # truncated transfer never lands as a usable-looking model file.
+                tmp_path = abs_path.with_suffix(abs_path.suffix + ".partial")
+                with open(tmp_path, "wb") as f:
                     async for chunk in r.content.iter_chunked(1024 * 1024):  # 1MB chunks
                         f.write(chunk)
                         downloaded += len(chunk)
@@ -2768,6 +2828,18 @@ async def handle_download_model(ws, msg: dict, args) -> None:
                                 except Exception:
                                     pass
 
+        if total_size and downloaded != total_size:
+            try: tmp_path.unlink(missing_ok=True)
+            except Exception: pass
+            raise Exception(
+                f"truncated download: got {downloaded} bytes, Content-Length {total_size}"
+            )
+        if abs_path.suffix.lower() == ".safetensors" and not safetensors_appears_valid(tmp_path):
+            try: tmp_path.unlink(missing_ok=True)
+            except Exception: pass
+            raise Exception("downloaded safetensors failed header/truncation validation")
+        tmp_path.replace(abs_path)
+
         # Refresh model list and send back to server
         log.info(f"Download complete: {abs_path}")
         updated_models = await get_available_models(args.comfyui_http)
@@ -2782,12 +2854,13 @@ async def handle_download_model(ws, msg: dict, args) -> None:
 
     except Exception as e:
         log.error(f"Download failed: {e}")
-        # Remove partial file
-        try:
-            if abs_path.exists():
-                abs_path.unlink()
-        except Exception:
-            pass
+        # Remove partial files (both the .partial temp and any stale dest).
+        for p in (locals().get("tmp_path"), abs_path):
+            try:
+                if p is not None and Path(p).exists():
+                    Path(p).unlink()
+            except Exception:
+                pass
         await ws.send(json.dumps({
             "type":        "download_error",
             "download_id": download_id,
