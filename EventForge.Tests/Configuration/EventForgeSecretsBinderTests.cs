@@ -57,4 +57,38 @@ public class EventForgeSecretsBinderTests
 
         opts.VastAi.ApiKey.Should().Be("nested-key");
     }
+
+    [Fact]
+    public void Apply_binds_payment_credentials_from_eventforge_secrets()
+    {
+        var json = """
+            {
+              "EventForge": {
+                "Payments": {
+                  "PayPal": {
+                    "ClientId": "paypal-client",
+                    "Secret": "paypal-secret",
+                    "Mode": "live"
+                  },
+                  "NowPayments": {
+                    "ApiKey": "now-key",
+                    "IpnSecret": "now-ipn"
+                  }
+                }
+              }
+            }
+            """;
+        var config = new ConfigurationBuilder()
+            .AddJsonStream(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json)))
+            .Build();
+        var opts = new EventForgeOptions();
+
+        EventForgeSecretsBinder.Apply(config, opts);
+
+        opts.Payments.PayPal.ClientId.Should().Be("paypal-client");
+        opts.Payments.PayPal.Secret.Should().Be("paypal-secret");
+        opts.Payments.PayPal.Mode.Should().Be("live");
+        opts.Payments.NowPayments.ApiKey.Should().Be("now-key");
+        opts.Payments.NowPayments.IpnSecret.Should().Be("now-ipn");
+    }
 }

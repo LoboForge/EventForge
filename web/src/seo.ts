@@ -1,12 +1,12 @@
 export const SITE = {
   name: 'EventForge',
-  title: 'EventForge — Production GPU Fleet as a Service',
+  title: 'EventForge — Request Production GPU Inference Capacity',
   description:
-    'Production-ready GPU fleet as a service. No provisioning your own boxes, no fleet management, no manual scaling. Submit jobs, subscribe to events, pay per job. HTTP queue + WebSocket event bus for image, video, and LLM workloads.',
+    'Request production capacity for image, video, music, and text generation behind one job queue API. Bring custom LoRAs and settle by PayPal invoice, wire transfer, or Monero.',
   url:
     (import.meta.env.VITE_PUBLIC_URL as string | undefined)?.replace(/\/$/, '') ||
     'https://eventforge.loboforge.com',
-  tagline: 'GPU fleet as a service — pay per job',
+  tagline: 'GPU inference capacity as a service — custom LoRAs, manual billing, production queue',
 } as const
 
 export type PageSeoOptions = {
@@ -77,29 +77,50 @@ export function applyPageSeo(opts: PageSeoOptions = {}) {
   upsertJsonLd(opts.jsonLd)
 }
 
-export function buildLandingJsonLd() {
-  return [
+export type JsonLdPlan = {
+  name: string
+  price_usd: number
+  credits: number
+  description: string
+}
+
+export type JsonLdFaq = {
+  question: string
+  answer: string
+}
+
+export function buildLandingJsonLd(plans: JsonLdPlan[] = [], faq: JsonLdFaq[] = []) {
+  const blocks: object[] = [
     {
       '@context': 'https://schema.org',
       '@type': 'Organization',
       name: SITE.name,
       url: SITE.url,
       description: SITE.description,
+      email: 'sales@loboforge.com',
+      parentOrganization: {
+        '@type': 'Organization',
+        name: 'LoboForge',
+        url: 'https://www.loboforge.com/',
+      },
     },
     {
       '@context': 'https://schema.org',
-      '@type': 'SoftwareApplication',
-      name: SITE.name,
-      applicationCategory: 'DeveloperApplication',
-      operatingSystem: 'Web',
-      offers: {
+      '@type': 'Product',
+      name: 'EventForge GPU Inference Credits',
+      description:
+        'Prepaid credits for GPU inference: image, video, music, and text generation with custom LoRA support, priority queue tiers, and results over WebSocket.',
+      brand: { '@type': 'Brand', name: SITE.name },
+      url: `${SITE.url}/#pricing`,
+      offers: plans.map((p) => ({
         '@type': 'Offer',
-        price: '0',
+        name: `${p.name} — ${p.credits.toLocaleString('en-US')} credits`,
+        price: String(p.price_usd),
         priceCurrency: 'USD',
-        description: 'Usage-based pricing per GPU job; contact for integration.',
-      },
-      description: SITE.description,
-      url: SITE.url,
+        description: p.description,
+        url: `${SITE.url}/request`,
+        availability: 'https://schema.org/InStock',
+      })),
     },
     {
       '@context': 'https://schema.org',
@@ -109,4 +130,16 @@ export function buildLandingJsonLd() {
       description: SITE.description,
     },
   ]
+  if (faq.length > 0) {
+    blocks.push({
+      '@context': 'https://schema.org',
+      '@type': 'FAQPage',
+      mainEntity: faq.map((f) => ({
+        '@type': 'Question',
+        name: f.question,
+        acceptedAnswer: { '@type': 'Answer', text: f.answer },
+      })),
+    })
+  }
+  return blocks
 }

@@ -13,6 +13,7 @@ public sealed class StartupInitializationService : IHostedService
     private readonly WriteBehindPersistence _persist;
     private readonly IEventStore _events;
     private readonly LoraAssetService _loras;
+    private readonly AccountStore _accounts;
     private readonly ILogger<StartupInitializationService> _log;
     private Task? _initializeTask;
 
@@ -21,12 +22,14 @@ public sealed class StartupInitializationService : IHostedService
         WriteBehindPersistence persist,
         IEventStore events,
         LoraAssetService loras,
+        AccountStore accounts,
         ILogger<StartupInitializationService> log)
     {
         _sqliteS3 = sqliteS3;
         _persist = persist;
         _events = events;
         _loras = loras;
+        _accounts = accounts;
         _log = log;
     }
 
@@ -35,6 +38,7 @@ public sealed class StartupInitializationService : IHostedService
         // Fast schema setup only — keeps hosted services from failing before hydration.
         await _events.InitializeAsync(cancellationToken);
         await _loras.InitializeAsync(cancellationToken);
+        await _accounts.InitializeAsync(cancellationToken);
         _initializeTask = InitializeInBackgroundAsync(cancellationToken);
     }
 
@@ -58,6 +62,7 @@ public sealed class StartupInitializationService : IHostedService
             await _sqliteS3.RestoreOnStartupAsync(cancellationToken);
             await _persist.LoadAsync(cancellationToken);
             await _loras.InitializeAsync(cancellationToken);
+            await _accounts.InitializeAsync(cancellationToken);
             _log.LogInformation("EventForge startup initialization completed (cache_loaded={Loaded})", _persist.IsLoaded);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

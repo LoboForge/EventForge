@@ -6,6 +6,7 @@ using EventForge.Configuration;
 using EventForge.Infrastructure;
 using EventForge.Models;
 using EventForge.Persistence;
+using EventForge.Payments;
 using EventForge.Queue;
 using EventForge.Services;
 using EventForge.Storage;
@@ -39,10 +40,15 @@ public static class EventForgeApplication
         builder.Services.PostConfigure<EventForgeOptions>(opts =>
             EventForgeSecretsBinder.Apply(builder.Configuration, opts));
 
+        builder.Services.AddSingleton<AccountStore>();
+        builder.Services.AddSingleton<AccountService>();
+        builder.Services.AddSingleton<PaymentService>();
         builder.Services.AddSingleton<IApiKeyValidator, ConfigApiKeyValidator>();
         builder.Services.AddSingleton<IWorkerKeyValidator, ConfigWorkerKeyValidator>();
         builder.Services.AddSingleton<IOpsKeyValidator, ConfigOpsKeyValidator>();
         builder.Services.AddHttpClient<IVastAiClient, VastAiClient>();
+        builder.Services.AddHttpClient<IPayPalPaymentClient, PayPalPaymentClient>();
+        builder.Services.AddHttpClient<INowPaymentsClient, NowPaymentsClient>();
         builder.Services.AddSingleton<InMemoryJobQueue>();
         builder.Services.AddSingleton<IEventStore, SqliteEventStore>();
         builder.Services.AddSingleton<ISqliteS3Persistence, SqliteS3Persistence>();
@@ -69,6 +75,25 @@ public static class EventForgeApplication
 
         var app = builder.Build();
 
+        app.UseWhen(
+            ctx => ctx.Request.Path.StartsWithSegments("/v1/public"),
+            branch => branch.Use(async (ctx, next) =>
+            {
+                try
+                {
+                    await next(ctx);
+                }
+                catch (Exception ex) when (!ctx.RequestAborted.IsCancellationRequested)
+                {
+                    app.Logger.LogError(ex, "Unhandled public API error for {Path}", ctx.Request.Path);
+                    if (ctx.Response.HasStarted) return;
+                    ctx.Response.Clear();
+                    ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                    await ctx.Response.WriteAsJsonAsync(
+                        new { error = "internal_error" },
+                        ctx.RequestAborted);
+                }
+            }));
         app.UseWebSockets();
 
         var sqliteS3 = app.Services.GetRequiredService<ISqliteS3Persistence>();
@@ -84,6 +109,8 @@ public static class EventForgeApplication
         app.Urls.Add(listenUrl);
 
         app.MapHealthEndpoints();
+        app.MapPublicEndpoints();
+        app.MapCapacityEndpoints();
         app.MapAgentEndpoints();
         app.MapJobEndpoints();
         app.MapConsumerEndpoints();

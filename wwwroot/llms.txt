@@ -1,47 +1,48 @@
 # EventForge
 
-> Production-ready GPU fleet as a service. No provisioning your own boxes, no fleet management, no manual scaling. Submit jobs over HTTP, receive completions over WebSocket, pay per job.
+> EventForge provides production GPU inference capacity for image, video, music, and text generation behind one queue API. Request the models and approximate job volume you need; ops reviews capacity and sends a PayPal invoice, wire instructions, or Monero payment details. After payment clears, ops activates an API key. Custom LoRA uploads, WebSocket results, HTTP replay, and managed artifacts are supported.
 
 Canonical site: https://eventforge.loboforge.com/
-Agent / operator runbook (repo): event-forge/AGENTS.md
-Extended context for AI assistants: https://eventforge.loboforge.com/ai-context/eventforge-context.md
-Operator runbook (web): https://eventforge.loboforge.com/ai-context/agents.md
-Integration guide (LoboForge monorepo): https://github.com/loboforge/LoboForge.Studio/blob/main/docs/QueueIntegration.md
-Operator / coding agent runbook: https://eventforge.loboforge.com/ai-context/agents.md
-Sitemap: https://eventforge.loboforge.com/sitemap.xml
+Request capacity: https://eventforge.loboforge.com/request
+Sign in / account: https://eventforge.loboforge.com/login
+Extended context: https://eventforge.loboforge.com/ai-context/eventforge-context.md
+Integration reference: https://eventforge.loboforge.com/ai-context/eventforge-context.md
+Contact: sales@loboforge.com
+
+## Public discovery and request API
+
+- `GET /v1/public/plans` — starting package and estimate guidance
+- `GET /v1/public/models` — current model catalog
+- `POST /v1/public/capacity-request` — no auth required:
+  `{ "email", "company"?, "name"?, "models": string[], "estimated_jobs": number, "notes"?, "preferred_payment": "paypal"|"wire"|"monero"|"any" }`
+  Returns `{ "request_id", "status": "received", "message" }`.
+- `POST /v1/public/register`, `POST /v1/public/login`, and `GET /v1/public/account` remain available for account tracking.
+- Automated checkout/capture routes are retired and return `410 { "error": "manual_billing" }`.
+
+## Billing and activation
+
+Ops reviews each request and arranges one of:
+
+- PayPal invoice, created through PayPal Invoicing or attached manually;
+- wire transfer with a request-specific reference;
+- Monero payment to the configured receive address with a unique order reference.
+
+This v1 uses one Monero receive address plus a stored order reference; wallet-RPC subaddresses can be added later. Payment instructions and API keys are sent manually by ops. No automatic email delivery is implied.
+
+## Models and custom LoRAs
+
+Live catalog: `GET /v1/public/models`. It includes image, image-editing, video, music, captioning, and text workloads. Custom LoRAs are a first-class feature: upload via `POST /v1/assets/loras`, then reference the filename in job payloads.
+
+## Job API after activation
+
+- Enqueue: `POST /v1/jobs` with the `efk_` API key
+- Events: `WSS /v1/ws`
+- Replay: `GET /api/v1/events?since=…`
+- Health, no auth: `GET /health` and `GET /healthws`
 
 ## Primary pages
 
-- Home / product overview: https://eventforge.loboforge.com/
-- Ops console (authenticated, noindex): https://eventforge.loboforge.com/ops
-- AI integration context: https://eventforge.loboforge.com/ai-context/eventforge-context.md
-
-## What EventForge provides
-
-- HTTP job queue (`POST /v1/jobs`) scoped by app API key → `app_id`
-- WebSocket event bus (`WSS /v1/ws`) with subscribe + replay for offline clients
-- HTTP event replay (`GET /api/v1/events?since=…`) as fallback
-- Managed GPU worker fleet (check-in, claim, health, Vast.ai provisioning)
-- Artifact upload and storage via EventForge (`PUT /v1/jobs/{id}/output`)
-- Ops dashboard for fleet, queue, failures, and Vast rent/terminate
-
-## What integrators do NOT do
-
-- Provision or rent GPU boxes themselves
-- Manage worker bootstrap, scaling, or fleet health dashboards (unless using ops console)
-- Publish completion events (listen-only WebSocket)
-- Write job outputs directly to their own object storage (workers upload through EventForge)
-
-## Event types (WebSocket)
-
-- forge.job.started
-- forge.job.completed
-- forge.job.failed
-- forge.job.timeout
-- forge.job.released
-- forge.stream.token
-- forge.stream.done
-
-## Pricing model
-
-Usage-based per GPU job. Contact ops@loboforge.com for API keys and integration.
+- Product overview: https://eventforge.loboforge.com/
+- Capacity request: https://eventforge.loboforge.com/request
+- Account / API key: https://eventforge.loboforge.com/login
+- Ops console, authenticated and noindex: https://eventforge.loboforge.com/ops

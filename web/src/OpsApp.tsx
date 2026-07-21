@@ -21,12 +21,14 @@ import {
 } from './api'
 import { OpsFleetTab } from './OpsFleetTab'
 import { OpsVastTab } from './OpsVastTab'
+import { OpsCapacityTab } from './OpsCapacityTab'
 import { UploadDock } from './UploadDock'
 
-type Tab = 'overview' | 'fleet' | 'queue' | 'apps' | 'moderation' | 'failures' | 'vast'
+type Tab = 'overview' | 'capacity' | 'fleet' | 'queue' | 'apps' | 'moderation' | 'failures' | 'vast'
 
 const TAB_LABELS: Record<Tab, string> = {
   overview: 'Overview',
+  capacity: 'Capacity requests',
   fleet: 'Fleet',
   queue: 'Queue',
   apps: 'Consumers',
@@ -986,11 +988,12 @@ export default function OpsApp() {
         <div className="stat kpi"><div className="label">Apps</div><div className="value">{appRows.length}</div></div>
       </div>
       <nav className="tabs ops-tabs">
-        {(['overview', 'fleet', 'queue', 'apps', 'moderation', 'failures', 'vast'] as Tab[]).map((t) => (
+        {(['overview', 'capacity', 'fleet', 'queue', 'apps', 'moderation', 'failures', 'vast'] as Tab[]).map((t) => (
           <button key={t} className={'tab' + (tab === t ? ' active' : '')} onClick={() => setTab(t)}>{TAB_LABELS[t]}</button>
         ))}
       </nav>
       {tab === 'overview' && <OverviewTab snapshot={snapshot} metrics={metrics} />}
+      {tab === 'capacity' && <OpsCapacityTab />}
       {tab === 'fleet' && <OpsFleetTab workers={workers} onRefresh={refresh} />}
       {tab === 'queue' && (
         <QueueTab

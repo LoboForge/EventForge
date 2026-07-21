@@ -28,11 +28,13 @@ public sealed class StartupInitializationServiceTests
             var blobs = new LoraAssetBlobStore(opts, NullLogger<LoraAssetBlobStore>.Instance);
             var catalog = new LoraAssetCatalog(opts, NullLogger<LoraAssetCatalog>.Instance);
             var loras = new LoraAssetService(opts, catalog, blobs, persist, NullLogger<LoraAssetService>.Instance);
+            var accounts = new AccountStore(opts);
             var svc = new StartupInitializationService(
                 delayed,
                 persist,
                 events,
                 loras,
+                accounts,
                 NullLogger<StartupInitializationService>.Instance);
 
             var sw = System.Diagnostics.Stopwatch.StartNew();

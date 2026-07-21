@@ -73,6 +73,28 @@ Apps should verify both endpoints before enqueueing or opening a WebSocket (see 
 
 ---
 
+## Capacity requests and manual billing
+
+The public catalog and capacity-request APIs are under `/v1/public`. Starting packages are estimate guidance, not an automated checkout. Registration and login remain available for account tracking; a capacity request can be submitted without an account or with an optional seven-day session token.
+
+- `GET /v1/public/plans` returns starting package anchors: `{ "plans": [{ "id", "name", "description", "price_usd", "credits", "features" }], "custom": { "enterprise_contact": "sales@loboforge.com" } }`.
+- `GET /v1/public/models` returns `{ "models": [{ "id", "name", "kind", "description", "supports_custom_loras" }] }`.
+- `POST /v1/public/capacity-request` accepts `{ "email", "company"?, "name"?, "models": string[], "estimated_jobs": number, "notes"?, "preferred_payment": "paypal"|"wire"|"monero"|"any" }` and returns `{ "request_id", "status": "received", "message" }`.
+- `POST /v1/public/register` accepts `{ "email", "password", "company"? }` and returns `{ "account_id", "email", "created_at" }`.
+- `POST /v1/public/login` accepts `{ "email", "password" }` and returns `{ "session_token", "account_id", "email" }`.
+- `GET /v1/public/account` returns `{ "account_id", "email", "company", "credits", "api_key", "created_at" }`. `api_key` is `null` until ops activates the request.
+- Legacy automated checkout, capture, and NOWPayments webhook routes return `410 { "error": "manual_billing" }`.
+
+Ops reviews each request and sends one of:
+
+- a PayPal invoice (created through PayPal Invoicing when credentials and an amount are configured, or attached by pasting a manually created invoice URL);
+- wire instructions loaded from `EventForge:Payments:Wire` secrets, with a request-specific reference;
+- a configured Monero receive address plus a random request-specific order reference. This v1 does not derive wallet subaddresses; ops reconciles the transfer using the stored order reference and request metadata.
+
+Ops endpoints (ops-key protected) list/filter requests, store payment instructions, approve, or reject. Approval creates or reuses the email's account, grants optional credits, and activates an `efk_...` API key. Email delivery is not automated in v1: instructions and keys are stored/logged for ops to send manually and securely.
+
+---
+
 ## Authentication
 
 All authenticated endpoints accept the token in either form:

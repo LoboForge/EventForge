@@ -30,6 +30,7 @@ public sealed class EventForgeOptions
     public S3StoreOptions S3 { get; set; } = new();
     public ArtifactS3Options Artifacts { get; set; } = new();
     public LoraAssetOptions LoraAssets { get; set; } = new();
+    public PaymentOptions Payments { get; set; } = new();
 }
 
 public sealed class S3StoreOptions
@@ -69,4 +70,84 @@ public sealed class LoraAssetOptions
 public sealed class VastAiOptions
 {
     public string ApiKey { get; set; } = "";
+}
+
+public sealed class PaymentOptions
+{
+    public PayPalOptions PayPal { get; set; } = new();
+    public NowPaymentsOptions NowPayments { get; set; } = new();
+    public WireOptions Wire { get; set; } = new();
+    public MoneroOptions Monero { get; set; } = new();
+    public PlanCatalogOptions Plans { get; set; } = new();
+}
+
+public sealed class PayPalOptions
+{
+    public string ClientId { get; set; } = "";
+    public string Secret { get; set; } = "";
+    public string Mode { get; set; } = "sandbox";
+    public string InvoiceNote { get; set; } = "EventForge prepaid capacity";
+}
+
+public sealed class NowPaymentsOptions
+{
+    public string ApiKey { get; set; } = "";
+    public string IpnSecret { get; set; } = "";
+}
+
+public sealed class WireOptions
+{
+    public string BankName { get; set; } = "";
+    public string AccountName { get; set; } = "";
+    public string AccountNumber { get; set; } = "";
+    public string RoutingNumber { get; set; } = "";
+    public string Swift { get; set; } = "";
+    public string Iban { get; set; } = "";
+    public string ReferenceTemplate { get; set; } = "EF-{request_id}";
+    public string Notes { get; set; } = "";
+}
+
+public sealed class MoneroOptions
+{
+    public bool Enabled { get; set; }
+    public string ReceiveAddress { get; set; } = "";
+}
+
+public sealed class PlanCatalogOptions
+{
+    public PlanOptions Starter { get; set; } = new()
+    {
+        Name = "Starter",
+        Description = "An affordable starting point for production GPU generation.",
+        PriceUsd = 29m,
+        Credits = 1_000,
+        Features = ["1,000 generation credits", "All public models", "Custom LoRA support"],
+    };
+
+    public PlanOptions Pro { get; set; } = new()
+    {
+        Name = "Pro",
+        Description = "More capacity for teams and growing applications.",
+        PriceUsd = 99m,
+        Credits = 4_000,
+        Features = ["4,000 generation credits", "All public models", "Custom LoRA support"],
+    };
+
+    public PlanOptions Scale { get; set; } = new()
+    {
+        Name = "Scale",
+        Description = "High-volume credits for established production workloads.",
+        PriceUsd = 299m,
+        Credits = 14_000,
+        Features = ["14,000 generation credits", "All public models", "Custom LoRA support"],
+    };
+}
+
+public sealed class PlanOptions
+{
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public decimal PriceUsd { get; set; }
+    public long Credits { get; set; }
+    public List<string> Features { get; set; } = [];
 }
