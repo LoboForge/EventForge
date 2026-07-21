@@ -9,9 +9,12 @@ import {
   getOpsKey,
   normalizeWorker,
   opsFetch,
+  opsOutputUrl,
   setOpsKey,
   type JobRow,
+  type ModerationJobRow,
   type OpsAppRow,
+  type OpsJobsResponse,
   type MetricsHistoryResponse,
   type Snapshot,
   type WorkerRow,
@@ -20,13 +23,14 @@ import { OpsFleetTab } from './OpsFleetTab'
 import { OpsVastTab } from './OpsVastTab'
 import { UploadDock } from './UploadDock'
 
-type Tab = 'overview' | 'fleet' | 'queue' | 'apps' | 'failures' | 'vast'
+type Tab = 'overview' | 'fleet' | 'queue' | 'apps' | 'moderation' | 'failures' | 'vast'
 
 const TAB_LABELS: Record<Tab, string> = {
   overview: 'Overview',
   fleet: 'Fleet',
   queue: 'Queue',
   apps: 'Consumers',
+  moderation: 'Moderation',
   failures: 'Failures',
   vast: 'Vast.ai',
 }
@@ -171,71 +175,146 @@ const capabilityColumns: SortableColumn<NonNullable<Snapshot['queue']['by_capabi
   },
 ]
 
+function PromptText({ prompt }: { prompt?: string | null }) {
+  const [open, setOpen] = useState(false)
+  if (!prompt) return <span className="muted">—</span>
+  const short = prompt.length > 90 ? prompt.slice(0, 90) + '…' : prompt
+  const clamped = prompt.length > 90
+  return (
+    <span
+      className="prompt-cell"
+      title={clamped && !open ? prompt : undefined}
+      style={{ whiteSpace: open ? 'pre-wrap' : 'nowrap', cursor: clamped ? 'pointer' : 'default', display: 'inline-block', maxWidth: open ? 480 : 320, overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }}
+      onClick={() => clamped && setOpen((v) => !v)}
+    >
+      {open ? prompt : short}
+      {clamped && <span className="muted small"> {open ? ' (less)' : ' (more)'}</span>}
+    </span>
+  )
+}
+
+function OutputThumb({ job }: { job: ModerationJobRow }) {
+  const [failed, setFailed] = useState(false)
+  if (!job.has_output) return <span className="muted small">no output</span>
+  const url = opsOutputUrl(job.job_id)
+  if (job.output_kind === 'image' && !failed) {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" title="Open full output">
+        <img
+          src={url}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+          style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 6, background: '#1b1f27', display: 'block' }}
+        />
+      </a>
+    )
+  }
+  const label = job.output_kind === 'video' ? '▶ video'
+    : job.output_kind === 'audio' ? '♪ audio'
+    : job.output_kind === 'text' ? 'text'
+    : failed ? 'preview n/a' : 'file'
+  return (
+    <a href={url} target="_blank" rel="noreferrer" className="badge idle" title="Open output in new tab">{label}</a>
+  )
+}
+
+type QueueSubTab = 'queued' | 'in_flight' | 'completed'
+
 function QueueTab({
   snapshot,
   activeJobs,
   workers,
-  onCancel,
-  busyId,
+  onRefresh,
 }: {
   snapshot: Snapshot | null
   activeJobs: JobRow[]
   workers: WorkerRow[]
-  onCancel: (jobId: string) => void
-  busyId: string | null
+  onRefresh: () => void
 }) {
   const q = snapshot?.queue
   const now = useNow(true)
-  const jobs = activeJobs.length ? activeJobs : (snapshot?.active_jobs ?? [])
+  const [sub, setSub] = useState<QueueSubTab>('in_flight')
+  const [rows, setRows] = useState<ModerationJobRow[]>([])
+  const [loading, setLoading] = useState(false)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
 
-  const columns = useMemo((): SortableColumn<JobRow>[] => [
+  const statusParam: Record<QueueSubTab, string> = {
+    queued: 'queued',
+    in_flight: 'active',
+    completed: 'completed',
+  }
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setErr(null)
+    try {
+      const r = await opsFetch<OpsJobsResponse>(`/v1/ops/jobs?status=${statusParam[sub]}&limit=200`)
+      setRows(r.jobs ?? [])
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setLoading(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sub])
+
+  useEffect(() => { void load() }, [load])
+
+  // Keep in-flight view live via the poll/WS-fed activeJobs prop.
+  const inFlightRows: ModerationJobRow[] = useMemo(() => {
+    if (sub !== 'in_flight') return rows
+    const byId = new Map(rows.map((r) => [r.job_id, r]))
+    return (activeJobs.length ? activeJobs : (snapshot?.active_jobs ?? [])).map((a) => ({
+      ...(byId.get(a.job_id) ?? {}),
+      ...a,
+    }))
+  }, [sub, rows, activeJobs, snapshot])
+
+  async function cancelJob(jobId: string, includeInFlight: boolean) {
+    if (!confirm(`Cancel job ${jobId.slice(0, 8)}? Queued work is removed; in-flight work is failed so a late worker result cannot revive it. S3 job artifacts are deleted.`)) return
+    setBusyId(jobId)
+    setErr(null); setMsg(null)
+    try {
+      await opsFetch(`/v1/ops/jobs/${jobId}/cancel`, { method: 'POST', body: JSON.stringify({ include_in_flight: includeInFlight, delete_artifacts: true }) })
+      setMsg(`Cancelled ${jobId.slice(0, 8)}`)
+      await load(); onRefresh()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function deleteJob(job: ModerationJobRow) {
+    if (!confirm(`Delete completed job ${job.job_id.slice(0, 8)} for ${job.app_id ?? 'app'}?\n\nThis permanently deletes the output image/file from S3 storage and removes it from the event store so the consumer can NO LONGER receive or pick up this result. This cannot be undone.`)) return
+    setBusyId(job.job_id)
+    setErr(null); setMsg(null)
+    try {
+      await opsFetch(`/v1/ops/jobs/${job.job_id}`, { method: 'DELETE' })
+      setMsg(`Deleted ${job.job_id.slice(0, 8)} and its S3 output`)
+      await load(); onRefresh()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const inFlightColumns = useMemo((): SortableColumn<ModerationJobRow>[] => [
+    { id: 'job', header: 'Job', sortValue: (r) => r.job_id, render: (r) => <code title={r.job_id}>{r.job_id.slice(0, 8)}</code> },
+    { id: 'app', header: 'App', sortValue: (r) => r.app_id ?? '', render: (r) => <code title={r.app_id}>{r.app_id ?? '—'}</code> },
+    { id: 'capability', header: 'Capability', sortValue: (r) => r.capability, render: (r) => r.capability },
+    { id: 'prompt', header: 'Prompt', sortable: false, render: (r) => <PromptText prompt={r.prompt} /> },
+    { id: 'worker', header: 'Worker', sortValue: (r) => r.hostname ?? r.worker_id ?? '', render: (r) => r.hostname ?? r.worker_id ?? '—' },
     {
-      id: 'job',
-      header: 'Job',
-      sortValue: (row) => row.job_id,
-      render: (row) => <code title={row.job_id}>{row.job_id.slice(0, 8)}</code>,
-    },
-    {
-      id: 'app',
-      header: 'App',
-      sortValue: (row) => row.app_id ?? '',
-      render: (row) => <code title={row.app_id}>{row.app_id ?? '—'}</code>,
-    },
-    {
-      id: 'capability',
-      header: 'Capability',
-      sortValue: (row) => row.capability,
-      render: (row) => row.capability,
-    },
-    {
-      id: 'tier',
-      header: 'Tier',
-      sortValue: (row) => row.tier,
-      render: (row) => row.tier,
-    },
-    {
-      id: 'worker',
-      header: 'Worker',
-      sortValue: (row) => row.hostname ?? row.worker_id ?? '',
-      render: (row) => row.hostname ?? row.worker_id ?? '—',
-    },
-    {
-      id: 'picked_up',
-      header: 'Picked up',
-      sortValue: (row) => row.leased_at ?? row.created_at ?? '',
-      render: (row) => (
-        <span className="muted" title={row.leased_at ?? row.created_at ?? undefined}>
-          {formatDateTime(row.leased_at ?? row.created_at)}
-        </span>
-      ),
-    },
-    {
-      id: 'running',
-      header: 'Running',
-      sortValue: (row) => runningDurationMs(row.leased_at, now) ?? -1,
-      render: (row) => {
-        const ms = runningDurationMs(row.leased_at, now)
-        const orphan = isOrphanLease(row, workers)
+      id: 'running', header: 'Running', className: 'num-cell',
+      sortValue: (r) => runningDurationMs(r.leased_at, now) ?? -1,
+      render: (r) => {
+        const ms = runningDurationMs(r.leased_at, now)
+        const orphan = isOrphanLease(r, workers)
         return (
           <span className={orphan ? 'warn-text' : ''} title={orphan ? 'Worker is busy on a different job' : undefined}>
             {ms != null ? formatDuration(ms) : '—'}
@@ -243,26 +322,51 @@ function QueueTab({
           </span>
         )
       },
-      className: 'num-cell',
     },
     {
-      id: 'lease_until',
-      header: 'Lease until',
-      sortValue: (row) => row.leased_until ?? '',
-      render: (row) => <span className="muted">{formatDateTime(row.leased_until)}</span>,
-    },
-    {
-      id: 'actions',
-      header: '',
-      sortable: false,
-      render: (row) => (
-        <button className="btn secondary small" disabled={busyId === row.job_id} onClick={() => onCancel(row.job_id)}>
-          {busyId === row.job_id ? '…' : 'Cancel'}
+      id: 'actions', header: '', sortable: false, className: 'actions-cell',
+      render: (r) => (
+        <button className="btn secondary small" disabled={busyId === r.job_id} onClick={() => void cancelJob(r.job_id, true)}>
+          {busyId === r.job_id ? '…' : 'Cancel'}
         </button>
       ),
-      className: 'actions-cell',
     },
-  ], [busyId, now, onCancel, workers])
+  ], [busyId, now, workers])
+
+  const queuedColumns = useMemo((): SortableColumn<ModerationJobRow>[] => [
+    { id: 'job', header: 'Job', sortValue: (r) => r.job_id, render: (r) => <code title={r.job_id}>{r.job_id.slice(0, 8)}</code> },
+    { id: 'app', header: 'App', sortValue: (r) => r.app_id ?? '', render: (r) => <code title={r.app_id}>{r.app_id ?? '—'}</code> },
+    { id: 'capability', header: 'Capability', sortValue: (r) => r.capability, render: (r) => r.capability },
+    { id: 'tier', header: 'Tier', sortValue: (r) => r.tier, render: (r) => r.tier },
+    { id: 'prompt', header: 'Prompt', sortable: false, render: (r) => <PromptText prompt={r.prompt} /> },
+    { id: 'created', header: 'Created', sortValue: (r) => r.created_at ?? '', render: (r) => <span className="muted">{formatDateTime(r.created_at)}</span> },
+    {
+      id: 'actions', header: '', sortable: false, className: 'actions-cell',
+      render: (r) => (
+        <button className="btn secondary small" disabled={busyId === r.job_id} onClick={() => void cancelJob(r.job_id, false)}>
+          {busyId === r.job_id ? '…' : 'Cancel'}
+        </button>
+      ),
+    },
+  ], [busyId])
+
+  const completedColumns = useMemo((): SortableColumn<ModerationJobRow>[] => [
+    { id: 'thumb', header: '', sortable: false, render: (r) => <OutputThumb job={r} /> },
+    { id: 'job', header: 'Job', sortValue: (r) => r.job_id, render: (r) => <code title={r.job_id}>{r.job_id.slice(0, 8)}</code> },
+    { id: 'app', header: 'App', sortValue: (r) => r.app_id ?? '', render: (r) => <code title={r.app_id}>{r.app_id ?? '—'}</code> },
+    { id: 'capability', header: 'Capability', sortValue: (r) => r.capability, render: (r) => r.capability },
+    { id: 'prompt', header: 'Prompt', sortable: false, render: (r) => <PromptText prompt={r.prompt} /> },
+    { id: 'output', header: 'Output', sortValue: (r) => r.output_kind ?? '', render: (r) => <span className="muted small">{r.output_kind ?? '—'}</span> },
+    { id: 'completed', header: 'Completed', sortValue: (r) => r.completed_at ?? '', render: (r) => <span className="muted">{formatDateTime(r.completed_at)}</span> },
+    {
+      id: 'actions', header: '', sortable: false, className: 'actions-cell',
+      render: (r) => (
+        <button className="btn warn small" disabled={busyId === r.job_id} onClick={() => void deleteJob(r)}>
+          {busyId === r.job_id ? '…' : 'Delete'}
+        </button>
+      ),
+    },
+  ], [busyId])
 
   return (
     <>
@@ -273,24 +377,55 @@ function QueueTab({
         <div className="stat"><div className="label">Failed</div><div className="value">{q?.jobs_failed ?? 0}</div></div>
       </div>
 
-      <div className="card queue-active-card">
+      <div className="card">
+        {msg && <div className="success">{msg}</div>}
+        {err && <div className="error">{err}</div>}
         <div className="card-head">
           <div>
-            <h2>Jobs in progress</h2>
-            <p className="muted card-sub">
-              {jobs.length} leased job{jobs.length === 1 ? '' : 's'} · sorted by runtime · orphan = worker moved on without completing
-            </p>
+            <h2>Jobs</h2>
+            <p className="muted card-sub">Inspect queued, in-flight, and completed jobs. Prompts are click-to-expand; completed rows show the output thumbnail.</p>
+          </div>
+          <div className="row" style={{ gap: '0.4rem', alignItems: 'center' }}>
+            <nav className="tabs" style={{ margin: 0 }}>
+              {(['queued', 'in_flight', 'completed'] as QueueSubTab[]).map((s) => (
+                <button key={s} className={'tab' + (sub === s ? ' active' : '')} onClick={() => setSub(s)}>
+                  {s === 'in_flight' ? 'In flight' : s === 'queued' ? 'Queued' : 'Completed'}
+                </button>
+              ))}
+            </nav>
+            <button className="btn secondary small" disabled={loading} onClick={() => void load()}>{loading ? '…' : 'Reload'}</button>
           </div>
         </div>
-        <SortableTable
-          className="queue-active-table"
-          rows={jobs}
-          rowKey={(row) => row.job_id}
-          columns={columns}
-          defaultSort={{ id: 'running', dir: 'desc' }}
-          rowClassName={(row) => (isOrphanLease(row, workers) ? 'orphan-row' : undefined)}
-          emptyMessage="No jobs in progress."
-        />
+
+        {sub === 'in_flight' && (
+          <SortableTable
+            className="queue-active-table"
+            rows={inFlightRows}
+            rowKey={(r) => r.job_id}
+            columns={inFlightColumns}
+            defaultSort={{ id: 'running', dir: 'desc' }}
+            rowClassName={(r) => (isOrphanLease(r, workers) ? 'orphan-row' : undefined)}
+            emptyMessage={loading ? 'Loading…' : 'No jobs in progress.'}
+          />
+        )}
+        {sub === 'queued' && (
+          <SortableTable
+            rows={rows}
+            rowKey={(r) => r.job_id}
+            columns={queuedColumns}
+            defaultSort={{ id: 'created', dir: 'desc' }}
+            emptyMessage={loading ? 'Loading…' : 'No queued jobs.'}
+          />
+        )}
+        {sub === 'completed' && (
+          <SortableTable
+            rows={rows}
+            rowKey={(r) => r.job_id}
+            columns={completedColumns}
+            defaultSort={{ id: 'completed', dir: 'desc' }}
+            emptyMessage={loading ? 'Loading…' : 'No completed jobs in memory.'}
+          />
+        )}
       </div>
 
       <div className="card">
@@ -305,6 +440,116 @@ function QueueTab({
         />
       </div>
     </>
+  )
+}
+
+function ModerationTab({ apps, onRefresh }: { apps: OpsAppRow[]; onRefresh: () => void }) {
+  const [appId, setAppId] = useState('')
+  const [keyword, setKeyword] = useState('')
+  const [includeInFlight, setIncludeInFlight] = useState(true)
+  const [preview, setPreview] = useState<{ matched: number; ids: string[] } | null>(null)
+  const [confirmText, setConfirmText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const canPreview = appId.trim().length > 0 && keyword.trim().length > 0
+
+  async function runDryRun() {
+    setBusy(true); setErr(null); setMsg(null); setPreview(null)
+    try {
+      const r = await opsFetch<{ matched: number; job_ids_sample: string[] }>('/v1/ops/jobs/cancel-by-keyword', {
+        method: 'POST',
+        body: JSON.stringify({ app_id: appId.trim(), keyword: keyword.trim(), include_in_flight: includeInFlight, dry_run: true }),
+      })
+      setPreview({ matched: r.matched, ids: r.job_ids_sample ?? [] })
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runCancel() {
+    if (confirmText.trim() !== appId.trim()) {
+      setErr(`Type the exact app id (${appId.trim()}) to confirm.`)
+      return
+    }
+    setBusy(true); setErr(null); setMsg(null)
+    try {
+      const r = await opsFetch<{ cancelled: number; matched: number }>('/v1/ops/jobs/cancel-by-keyword', {
+        method: 'POST',
+        body: JSON.stringify({ app_id: appId.trim(), keyword: keyword.trim(), include_in_flight: includeInFlight, dry_run: false, delete_s3: true }),
+      })
+      setMsg(`Cancelled ${r.cancelled} of ${r.matched} matching job(s) for ${appId.trim()}.`)
+      setPreview(null); setConfirmText('')
+      onRefresh()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="card">
+      {msg && <div className="success">{msg}</div>}
+      {err && <div className="error">{err}</div>}
+      <div className="card-head">
+        <div>
+          <h2>Manual moderation — cancel by keyword</h2>
+          <p className="muted card-sub">
+            Cancel queued and in-flight jobs for one consumer whose <strong>prompt text</strong> contains a keyword you type.
+            This is a manual, explicit action — no automatic content scanning. It never pauses the app or quarantines workers,
+            and only affects the selected consumer. Preview matches first, then confirm.
+          </p>
+        </div>
+      </div>
+
+      <div className="row" style={{ flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+          <span className="muted small">Consumer / app id</span>
+          <input list="moderation-apps" value={appId} onChange={(e) => { setAppId(e.target.value); setPreview(null) }} placeholder="app id" autoComplete="off" />
+          <datalist id="moderation-apps">
+            {apps.map((a) => <option key={a.app_id} value={a.app_id} />)}
+          </datalist>
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: '1 1 240px' }}>
+          <span className="muted small">Keyword (literal, case-insensitive substring of the prompt)</span>
+          <input value={keyword} onChange={(e) => { setKeyword(e.target.value); setPreview(null) }} placeholder="keyword to match in prompt" autoComplete="off" />
+        </label>
+        <label className="muted" style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+          <input type="checkbox" checked={includeInFlight} onChange={(e) => setIncludeInFlight(e.target.checked)} />
+          Include in-flight
+        </label>
+        <button className="btn secondary" disabled={busy || !canPreview} onClick={() => void runDryRun()}>
+          {busy ? '…' : 'Preview matches'}
+        </button>
+      </div>
+
+      {preview && (
+        <div style={{ marginTop: '1rem' }}>
+          <p>
+            <strong>{preview.matched}</strong> matching job(s) for <code>{appId.trim()}</code> containing “{keyword.trim()}”.
+            {preview.ids.length > 0 && <span className="muted small"> Sample: {preview.ids.slice(0, 10).map((i) => i.slice(0, 8)).join(', ')}</span>}
+          </p>
+          {preview.matched > 0 && (
+            <div className="row" style={{ gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <input
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder={`Type "${appId.trim()}" to confirm`}
+                autoComplete="off"
+                style={{ minWidth: 220 }}
+              />
+              <button className="btn warn" disabled={busy || confirmText.trim() !== appId.trim()} onClick={() => void runCancel()}>
+                {busy ? 'Cancelling…' : `Cancel ${preview.matched} matching job(s)`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -589,7 +834,6 @@ export default function OpsApp() {
   const [apps, setApps] = useState<OpsAppRow[]>([])
   const [activeJobs, setActiveJobs] = useState<JobRow[]>([])
   const [err, setErr] = useState<string | null>(null)
-  const [cancelBusy, setCancelBusy] = useState<string | null>(null)
 
   useEffect(() => {
     return applyPageSeo({
@@ -643,19 +887,6 @@ export default function OpsApp() {
 
   const workers = useMemo(() => (snapshot?.fleet.workers ?? []).map((w) => normalizeWorker(w)), [snapshot])
 
-  async function cancelJob(jobId: string) {
-    if (!confirm(`Cancel job ${jobId.slice(0, 8)}?`)) return
-    setCancelBusy(jobId)
-    try {
-      await opsFetch(`/v1/ops/jobs/${jobId}/cancel`, { method: 'POST', body: JSON.stringify({ include_in_flight: true }) })
-      await refresh()
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : String(ex))
-    } finally {
-      setCancelBusy(null)
-    }
-  }
-
   if (!authed) return <Login onLogin={() => setAuthed(true)} />
 
   const nonContrib = snapshot?.fleet.workers_non_contributing ?? workers.filter((w) => w.badges.length > 0).length
@@ -695,7 +926,7 @@ export default function OpsApp() {
         <div className="stat kpi"><div className="label">Apps</div><div className="value">{appRows.length}</div></div>
       </div>
       <nav className="tabs ops-tabs">
-        {(['overview', 'fleet', 'queue', 'apps', 'failures', 'vast'] as Tab[]).map((t) => (
+        {(['overview', 'fleet', 'queue', 'apps', 'moderation', 'failures', 'vast'] as Tab[]).map((t) => (
           <button key={t} className={'tab' + (tab === t ? ' active' : '')} onClick={() => setTab(t)}>{TAB_LABELS[t]}</button>
         ))}
       </nav>
@@ -706,11 +937,11 @@ export default function OpsApp() {
           snapshot={snapshot}
           activeJobs={activeJobs}
           workers={workers}
-          onCancel={(id) => void cancelJob(id)}
-          busyId={cancelBusy}
+          onRefresh={() => void refresh()}
         />
       )}
       {tab === 'apps' && <AppsTab apps={appRows} onRefresh={() => void refresh()} />}
+      {tab === 'moderation' && <ModerationTab apps={appRows} onRefresh={() => void refresh()} />}
       {tab === 'failures' && <FailuresTab snapshot={snapshot} onRefresh={() => void refresh()} />}
       {tab === 'vast' && <OpsVastTab />}
       <UploadDock />

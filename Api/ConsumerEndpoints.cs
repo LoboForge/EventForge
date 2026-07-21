@@ -200,6 +200,8 @@ public sealed class CancelQueuedBody
 
 public sealed class CancelJobBody
 {
+    [System.Text.Json.Serialization.JsonPropertyName("include_in_flight")]
     public bool IncludeInFlight { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("delete_artifacts")]
     public bool DeleteArtifacts { get; set; }
 }

@@ -12,8 +12,40 @@ using Microsoft.Extensions.Options;
 
 namespace EventForge.Services;
 
+public sealed record ClaimDiagnostics(
+    int QueuedMatching,
+    int BlockedPaused,
+    int BlockedModel,
+    int BlockedLora,
+    IReadOnlyList<string> MissingLoras);
+
+/// <summary>Result of an ops moderation delete of a finished job.</summary>
+/// <param name="Found">Whether a job record existed.</param>
+/// <param name="Status">Status the job had when found.</param>
+/// <param name="AppId">Owning consumer app id, when known.</param>
+/// <param name="Deleted">Whether the job record was removed.</param>
+/// <param name="EventsDeleted">Number of persisted event rows removed.</param>
+/// <param name="ActiveConflict">True when the job was still queued/in-flight and was NOT deleted.</param>
+public sealed record JobDeletionResult(
+    bool Found,
+    string? Status,
+    string? AppId,
+    bool Deleted,
+    int EventsDeleted,
+    bool ActiveConflict);
+
 public sealed class JobService
 {
+    /// <summary>Sticky error markers written when a job is cancelled. A late worker
+    /// <c>/complete</c> or <c>/output</c> for one of these must not resurrect it.</summary>
+    public const string CancelledByOps = "cancelled_by_ops";
+    public const string CancelledByConsumer = "cancelled_by_consumer";
+
+    internal static bool IsCancelledTerminal(JobRecord job) =>
+        string.Equals(job.Status, JobStatus.Failed, StringComparison.OrdinalIgnoreCase)
+        && (string.Equals(job.Error, CancelledByOps, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(job.Error, CancelledByConsumer, StringComparison.OrdinalIgnoreCase));
+
     private readonly EventForgeOptions _opts;
     private readonly InMemoryJobQueue _queue;
     private readonly IEventStore _events;
@@ -110,6 +142,70 @@ public sealed class JobService
         return job == null ? Task.FromResult<JobRecord?>(null) : EmitClaimStartedAsync(job, workerId, ct);
     }
 
+    /// <summary>
+    /// Explain why a fresh, claim-ready worker received no job. Returned through
+    /// response headers so older agents keep treating an empty claim as HTTP 204,
+    /// while newer agents can distinguish an empty queue from a blocked queue and
+    /// self-heal missing model/LoRA inventory.
+    /// </summary>
+    public ClaimDiagnostics GetClaimDiagnostics(
+        string? workerHostname,
+        string? capability = null,
+        string? tier = null)
+    {
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var readyCaps = WorkerClaimPolicy.ClaimableCapabilities(worker);
+        if (!string.IsNullOrWhiteSpace(capability))
+        {
+            readyCaps = WorkerClaimPolicy.CapabilityIsClaimable(worker, capability)
+                ? [capability.Trim()]
+                : [];
+        }
+        if (readyCaps.Count == 0)
+            return new ClaimDiagnostics(0, 0, 0, 0, []);
+
+        var capSet = readyCaps.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tierFilter = string.IsNullOrWhiteSpace(tier) || tier == "*" ? null : tier.Trim();
+        var modelGate = BuildModelGate(workerHostname);
+        var loraGate = BuildLoraGate(workerHostname);
+        var queued = _queue.SnapshotJobs()
+            .Where(j => j.Status == JobStatus.Queued)
+            .Where(j => capSet.Contains(j.Capability))
+            .Where(j => tierFilter == null || string.Equals(j.Tier, tierFilter, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var blockedPaused = 0;
+        var blockedModel = 0;
+        var blockedLora = 0;
+        var missingLoras = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var job in queued)
+        {
+            if (_apps.IsPaused(job.AppId))
+            {
+                blockedPaused++;
+                continue;
+            }
+            if (!modelGate(job))
+            {
+                blockedModel++;
+                continue;
+            }
+            if (loraGate(job))
+                continue;
+
+            blockedLora++;
+            foreach (var missing in MissingWorkerLoras(workerHostname, job))
+                missingLoras.Add(WorkerLoraCompatibility.NormalizeBasename(missing));
+        }
+
+        return new ClaimDiagnostics(
+            queued.Count,
+            blockedPaused,
+            blockedModel,
+            blockedLora,
+            missingLoras.Where(x => !string.IsNullOrWhiteSpace(x)).Order(StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
     private Func<JobRecord, bool> BuildCanClaimPredicate(string? workerHostname)
     {
         var modelGate = BuildModelGate(workerHostname);
@@ -141,21 +237,25 @@ public sealed class JobService
         var worker = _fleet.TryGetWorkerByHostname(workerHostname);
         var knownLoras = worker?.KnownLoras ?? [];
         var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
-        return job =>
-        {
-            var required = WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson);
-            if (required.Count == 0) return true;
-            // Allow claim when each required LoRA is on the worker OR registered ready for this app.
-            foreach (var req in required)
-            {
-                if (WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req))
-                    continue;
-                if (_loras.AppHasReadyLora(job.AppId, req))
-                    continue;
-                return false;
-            }
-            return true;
-        };
+        return job => WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson).All(req =>
+            WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req)
+            || _loras.AppHasReadyLora(job.AppId, req));
+    }
+
+    private IReadOnlyList<string> MissingWorkerLoras(string? workerHostname, JobRecord job)
+    {
+        var hn = workerHostname ?? "";
+        if (hn.Contains("wan-native", StringComparison.OrdinalIgnoreCase)
+            || hn.StartsWith("loboforge-wan-", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        var worker = _fleet.TryGetWorkerByHostname(workerHostname);
+        var knownLoras = worker?.KnownLoras ?? [];
+        var assets = WorkerModelAssets.FromJson(worker?.ModelsJson);
+        return WorkerLoraCompatibility.ExtractRequiredLoras(job.PayloadJson)
+            .Where(req => !WorkerLoraCompatibility.WorkerHasLora(knownLoras, assets, req))
+            .Where(req => !_loras.AppHasReadyLora(job.AppId, req))
+            .ToList();
     }
 
     /// <summary>Extend active lease when worker checks in while busy (prevents upload/complete 404).
@@ -512,6 +612,142 @@ public sealed class JobService
         return (cancelled, ids);
     }
 
+    /// <summary>
+    /// Manual moderation: cancel every queued and (optionally) in-flight job for a specific consumer
+    /// app whose prompt text contains an ops-entered keyword (case-insensitive literal substring).
+    /// Both <paramref name="appId"/> and <paramref name="keyword"/> are required by the caller. When
+    /// <paramref name="dryRun"/> is true nothing is mutated — only the matching ids/count are returned.
+    /// In-flight jobs are marked failed with <see cref="CancelledByOps"/> so a late worker completion
+    /// cannot resurrect them. Never pauses the app or quarantines workers.
+    /// </summary>
+    public async Task<(int Matched, int Cancelled, List<string> Ids, bool Executed)> CancelByAppKeywordAsync(
+        string appId,
+        string keyword,
+        string? capability,
+        bool includeInFlight,
+        bool dryRun,
+        bool deleteS3,
+        CancellationToken ct)
+    {
+        var app = appId.Trim();
+        var kw = keyword.Trim();
+        var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
+        if (app.Length == 0 || kw.Length == 0)
+            return (0, 0, new List<string>(), false);
+
+        bool Matches(JobRecord j)
+        {
+            if (!string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase)) return false;
+            if (cap != null && !string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase)) return false;
+            var text = JobPayloadReader.ExtractSearchablePromptText(j.PayloadJson);
+            return text.Contains(kw, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var eligibleStatuses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { JobStatus.Queued };
+        if (includeInFlight)
+        {
+            eligibleStatuses.Add(JobStatus.Leased);
+            eligibleStatuses.Add(JobStatus.Streaming);
+        }
+
+        var matched = _queue.SnapshotJobs()
+            .Where(j => eligibleStatuses.Contains(j.Status) && Matches(j))
+            .ToList();
+        var matchedIds = matched.Select(j => j.JobId).ToList();
+
+        if (dryRun)
+            return (matched.Count, 0, matchedIds, false);
+
+        var queuedIds = matched
+            .Where(j => string.Equals(j.Status, JobStatus.Queued, StringComparison.OrdinalIgnoreCase))
+            .Select(j => j.JobId)
+            .ToList();
+
+        var cancelled = 0;
+        if (queuedIds.Count > 0)
+        {
+            var idSet = new HashSet<string>(queuedIds, StringComparer.OrdinalIgnoreCase);
+            var removed = _queue.RemoveWhere(j =>
+                idSet.Contains(j.JobId) && string.Equals(j.Status, JobStatus.Queued, StringComparison.OrdinalIgnoreCase));
+            cancelled += removed.Count;
+            if (deleteS3 && removed.Count > 0)
+                await _artifacts.DeleteJobArtifactsBatchAsync(removed.Select(j => j.JobId).ToList(), ct);
+            await _persist.DeleteJobsAsync(removed.Select(j => j.JobId).ToList(), ct);
+            _persist.MarkDirty();
+        }
+
+        if (includeInFlight)
+        {
+            var inFlight = _queue.SnapshotJobs()
+                .Where(j => j.Status is JobStatus.Leased or JobStatus.Streaming && Matches(j))
+                .ToList();
+            foreach (var job in inFlight)
+            {
+                job.Status = JobStatus.Failed;
+                job.Error = CancelledByOps;
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                _queue.TryUpdate(job);
+                _fleet.OnFail(job.WorkerId, job.WorkerHostname);
+                await EmitLifecycleEventAsync(job, ForgeEventTypes.Failed, "failed", job.WorkerHostname, job.Error, ct);
+                await PublishOpsJobEventAsync("ops.job.cancelled", job, ct);
+                if (deleteS3)
+                {
+                    try { await _artifacts.DeleteJobArtifactsAsync(job.JobId, ct); }
+                    catch (Exception ex) { _log.LogWarning(ex, "Artifact delete failed for cancelled in-flight job {Job}", job.JobId); }
+                }
+                cancelled++;
+            }
+            if (inFlight.Count > 0)
+                _persist.MarkDirty();
+        }
+
+        _log.LogInformation(
+            "Ops keyword-cancelled {Count} job(s) app={App} keyword_len={KwLen} capability={Cap} include_in_flight={InFlight}",
+            cancelled, app, kw.Length, cap ?? "*", includeInFlight);
+        return (matched.Count, cancelled, matchedIds, true);
+    }
+
+    /// <summary>
+    /// Moderation delete of a finished (completed/failed) job before or after consumer pickup:
+    /// removes the output artifact from S3/local storage, deletes persisted completion events so a
+    /// consumer replay cannot receive the output, and removes the job record. Idempotent — a repeat
+    /// call for a missing job still attempts artifact/event cleanup. Refuses to delete a job that is
+    /// still queued or in-flight unless <paramref name="allowActive"/> is set (callers should cancel
+    /// instead). This is manual moderation — no scanning or content analysis is performed.
+    /// </summary>
+    public async Task<JobDeletionResult> DeleteCompletedJobAsync(
+        string jobId, bool allowActive, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(jobId))
+            return new JobDeletionResult(false, null, null, false, 0, false);
+        var id = jobId.Trim();
+        var job = await _persist.TryGetJobAsync(id, ct);
+
+        if (job != null
+            && job.Status is JobStatus.Queued or JobStatus.Leased or JobStatus.Streaming
+            && !allowActive)
+        {
+            return new JobDeletionResult(true, job.Status, job.AppId, false, 0, true);
+        }
+
+        // Delete the output artifact first (idempotent: S3/local delete of a missing prefix is a no-op).
+        await _artifacts.DeleteJobArtifactsAsync(id, ct);
+
+        var eventsDeleted = await _events.DeleteByJobAsync(id, ct);
+        var removed = job != null ? await _persist.DeleteJobsAsync(new[] { id }, ct) : 0;
+        _persist.MarkDirty();
+
+        if (job != null)
+        {
+            _log.LogWarning(
+                "Ops deleted finished job {Job} app={App} status={Status} events={Events}",
+                id, job.AppId, job.Status, eventsDeleted);
+            await PublishOpsJobEventAsync("ops.job.deleted", job, ct);
+        }
+
+        return new JobDeletionResult(job != null, job?.Status, job?.AppId, removed > 0 || job != null, eventsDeleted, false);
+    }
+
     public Task<(int Requeued, List<string> Ids)> RequeueFailedAsync(
         string? capability,
         string? appId,
@@ -698,6 +934,11 @@ public sealed class JobService
     {
         var job = await ResolveJobForWorkerAsync(jobId, workerId, ct);
         if (job == null) return false;
+        if (IsCancelledTerminal(job))
+        {
+            _log.LogWarning("Dropping late output upload for cancelled job {Job} app={App}", job.JobId, job.AppId);
+            return false;
+        }
 
         await using var buffer = new MemoryStream();
         await body.CopyToAsync(buffer, ct);
@@ -715,6 +956,11 @@ public sealed class JobService
     {
         var job = await ResolveJobForWorkerAsync(jobId, workerId, ct);
         if (job == null) return null;
+        if (IsCancelledTerminal(job))
+        {
+            _log.LogWarning("Dropping late completion for cancelled job {Job} app={App}", job.JobId, job.AppId);
+            return null;
+        }
 
         if (!string.IsNullOrWhiteSpace(textReply))
             job.TextReply = textReply;

@@ -149,6 +149,32 @@ export type JobRow = {
   completed_at?: string | null
 }
 
+/** Rich job row returned by GET /v1/ops/jobs (prompt + output metadata for moderation). */
+export type ModerationJobRow = JobRow & {
+  kind?: string
+  model?: string | null
+  prompt?: string | null
+  has_output?: boolean
+  output_content_type?: string | null
+  output_kind?: 'image' | 'video' | 'audio' | 'text' | 'other' | 'none'
+  output_proxy_url?: string | null
+  text_reply?: string | null
+}
+
+export type OpsJobsResponse = {
+  count: number
+  jobs: ModerationJobRow[]
+}
+
+/**
+ * Absolute URL to stream a completed job's output for thumbnail rendering. The ops key is passed as
+ * ?token= because <img>/<video> tags cannot send an Authorization header. Streams bytes only.
+ */
+export function opsOutputUrl(jobId: string): string {
+  const key = getOpsKey()
+  return `/v1/ops/jobs/${encodeURIComponent(jobId)}/output?token=${encodeURIComponent(key)}`
+}
+
 export function isGenFleetWorker(w: Pick<WorkerRow, 'hostname'>): boolean {
   const h = (w.hostname || '').toLowerCase()
   return h.startsWith('loboforge-image-')

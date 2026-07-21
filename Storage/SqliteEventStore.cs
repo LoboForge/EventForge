@@ -123,6 +123,17 @@ public sealed class SqliteEventStore : IEventStore
         return results;
     }
 
+    public async Task<int> DeleteByJobAsync(string jobId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobId)) return 0;
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM events WHERE job_id = $job";
+        cmd.Parameters.AddWithValue("$job", jobId.Trim());
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task PurgeExpiredAsync(CancellationToken ct = default)
     {
         await using var conn = new SqliteConnection(_connectionString);

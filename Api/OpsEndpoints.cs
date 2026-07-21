@@ -218,6 +218,80 @@ public static class OpsEndpoints
             });
         });
 
+        // Unified moderation listing: queued / in-flight / completed / failed with prompt + output
+        // metadata. status accepts a single value, a comma list, or the aliases "active"
+        // (leased+streaming) and "terminal" (completed+failed). Defaults to all statuses.
+        app.MapGet("/v1/ops/jobs", (
+            HttpContext ctx,
+            InMemoryJobQueue queue,
+            IOpsKeyValidator opsAuth,
+            string? status,
+            string? app_id,
+            string? capability,
+            string? q,
+            int limit = 100) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            limit = Math.Clamp(limit, 1, 500);
+
+            var wanted = ParseStatusFilter(status);
+            var app = string.IsNullOrWhiteSpace(app_id) ? null : app_id.Trim();
+            var cap = string.IsNullOrWhiteSpace(capability) ? null : capability.Trim();
+            var keyword = string.IsNullOrWhiteSpace(q) ? null : q.Trim();
+
+            var jobs = queue.SnapshotJobs()
+                .Where(j => wanted == null || wanted.Contains(j.Status))
+                .Where(j => app == null || string.Equals(j.AppId, app, StringComparison.OrdinalIgnoreCase))
+                .Where(j => cap == null || string.Equals(j.Capability, cap, StringComparison.OrdinalIgnoreCase))
+                .Where(j => keyword == null
+                    || JobPayloadReader.ExtractSearchablePromptText(j.PayloadJson)
+                        .Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(j => j.CompletedAt ?? j.LeasedAt ?? j.CreatedAt)
+                .Take(limit)
+                .Select(ToModerationJobDto)
+                .ToList();
+            return Results.Ok(new { count = jobs.Count, jobs });
+        });
+
+        app.MapPost("/v1/ops/jobs/cancel-by-keyword", async (
+            HttpContext ctx,
+            CancelByKeywordRequest body,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(body.AppId))
+                return Results.BadRequest(new { error = "app_id required" });
+            if (string.IsNullOrWhiteSpace(body.Keyword))
+                return Results.BadRequest(new { error = "keyword required" });
+
+            var (matched, cancelled, ids, executed) = await jobs.CancelByAppKeywordAsync(
+                body.AppId,
+                body.Keyword,
+                body.Capability,
+                body.IncludeInFlight,
+                body.DryRun,
+                body.DeleteS3,
+                ct);
+
+            return Results.Ok(new
+            {
+                app_id = body.AppId.Trim(),
+                capability = body.Capability,
+                keyword = body.Keyword.Trim(),
+                include_in_flight = body.IncludeInFlight,
+                dry_run = body.DryRun,
+                executed,
+                matched,
+                cancelled,
+                delete_s3 = body.DeleteS3,
+                job_ids_sample = ids.Take(50).ToList(),
+            });
+        });
+
         app.MapPost("/v1/ops/jobs/requeue-failed", async (
             HttpContext ctx,
             RequeueFailedRequest body,
@@ -372,6 +446,92 @@ public static class OpsEndpoints
                 completed_at = job.CompletedAt?.ToString("O"),
                 error = job.Error,
                 output_url = job.OutputUrl,
+                prompt = JobPayloadReader.ExtractPrompt(job.PayloadJson),
+            });
+        });
+
+        // Stream a completed job's output for thumbnail/preview rendering in the ops console.
+        // Ops key may be supplied via header or ?token= so an <img>/<video> tag can load it.
+        // Streams bytes only — never decodes or analyzes the artifact.
+        app.MapGet("/v1/ops/jobs/{jobId}/output", async (
+            HttpContext ctx,
+            string jobId,
+            WriteBehindPersistence persist,
+            IArtifactStore artifacts,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(jobId))
+                return Results.BadRequest(new { error = "job_id required" });
+
+            var job = await persist.TryGetJobAsync(jobId.Trim(), ct);
+            if (job == null || string.IsNullOrWhiteSpace(job.OutputUrl))
+                return Results.NotFound(new { job_id = jobId.Trim(), error = "no_output" });
+
+            var opened = await artifacts.TryOpenArtifactUrlAsync(job.OutputUrl, ct);
+            if (opened == null)
+                return Results.NotFound(new { job_id = job.JobId, error = "artifact_missing" });
+
+            var (stream, contentType, _) = opened.Value;
+            ctx.Response.Headers.CacheControl = "private, max-age=300";
+            return Results.Stream(stream, string.IsNullOrWhiteSpace(job.OutputContentType) ? contentType : job.OutputContentType);
+        });
+
+        // Moderation delete: remove a finished job's output artifact from S3/local storage, delete
+        // persisted completion events (so a consumer replay cannot receive it), and drop the record.
+        // Idempotent; returns 409 for a still-active job unless allow_active=true.
+        app.MapDelete("/v1/ops/jobs/{jobId}", async (
+            HttpContext ctx,
+            string jobId,
+            JobService jobs,
+            IOpsKeyValidator opsAuth,
+            CancellationToken ct) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(jobId))
+                return Results.BadRequest(new { error = "job_id required" });
+
+            var allowActive = string.Equals(ctx.Request.Query["allow_active"].ToString(), "true", StringComparison.OrdinalIgnoreCase);
+            JobDeletionResult result;
+            try
+            {
+                result = await jobs.DeleteCompletedJobAsync(jobId.Trim(), allowActive, ct);
+            }
+            catch (Amazon.S3.AmazonS3Exception ex)
+            {
+                return Results.Json(new
+                {
+                    error = "s3_delete_failed",
+                    message = ex.Message,
+                    s3_error_code = ex.ErrorCode,
+                    s3_status = (int?)ex.StatusCode,
+                    hint = "ECS task role needs s3:ListBucket + s3:DeleteObject on the forge-queue artifacts prefix (see scripts/grant-eventforge-forge-queue-s3-delete.sh).",
+                }, statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            if (result.ActiveConflict)
+            {
+                return Results.Json(new
+                {
+                    job_id = jobId.Trim(),
+                    status = result.Status,
+                    error = "job_active",
+                    message = "Job is still queued or in-flight. Cancel it (POST /v1/ops/jobs/{id}/cancel) or pass allow_active=true to force delete.",
+                }, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            return Results.Ok(new
+            {
+                job_id = jobId.Trim(),
+                found = result.Found,
+                deleted = result.Deleted,
+                status = result.Status,
+                app_id = result.AppId,
+                events_deleted = result.EventsDeleted,
+                output_artifact_deleted = true,
             });
         });
 
@@ -776,6 +936,87 @@ public static class OpsEndpoints
         };
     }
 
+    private static HashSet<string>? ParseStatusFilter(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status)) return null;
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in status.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            switch (raw.ToLowerInvariant())
+            {
+                case "active":
+                case "in_flight":
+                case "inflight":
+                    set.Add(JobStatus.Leased);
+                    set.Add(JobStatus.Streaming);
+                    break;
+                case "terminal":
+                case "finished":
+                    set.Add(JobStatus.Completed);
+                    set.Add(JobStatus.Failed);
+                    break;
+                default:
+                    set.Add(raw);
+                    break;
+            }
+        }
+        return set.Count == 0 ? null : set;
+    }
+
+    private static string ClassifyOutput(JobRecord j)
+    {
+        if (j.Kind == JobKind.TextStream || !string.IsNullOrWhiteSpace(j.TextReply)) return "text";
+        var ct = j.OutputContentType?.ToLowerInvariant() ?? "";
+        if (ct.StartsWith("image/")) return "image";
+        if (ct.StartsWith("video/")) return "video";
+        if (ct.StartsWith("audio/")) return "audio";
+        if (ct.StartsWith("text/") || ct.Contains("json")) return "text";
+        // Fall back to the output file extension when the worker sent a generic content type.
+        var url = j.OutputUrl ?? "";
+        var ext = Path.GetExtension(url).ToLowerInvariant();
+        return ext switch
+        {
+            ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif" or ".bmp" => "image",
+            ".mp4" or ".webm" or ".mov" or ".mkv" => "video",
+            ".mp3" or ".wav" or ".flac" or ".ogg" => "audio",
+            ".txt" or ".json" => "text",
+            "" => string.IsNullOrWhiteSpace(url) ? "none" : "other",
+            _ => "other",
+        };
+    }
+
+    /// <summary>Rich ops DTO: adds prompt text + output artifact metadata + a safe proxy URL for
+    /// thumbnail rendering. No image bytes are decoded/analyzed here.</summary>
+    private static object ToModerationJobDto(JobRecord j)
+    {
+        var hasOutput = !string.IsNullOrWhiteSpace(j.OutputUrl);
+        return new
+        {
+            job_id = j.JobId,
+            app_id = j.AppId,
+            capability = j.Capability,
+            tier = j.Tier,
+            kind = j.Kind,
+            status = j.Status,
+            model = JobPayloadReader.ExtractModelKey(j.PayloadJson),
+            prompt = JobPayloadReader.ExtractPrompt(j.PayloadJson),
+            worker_id = j.WorkerId,
+            hostname = j.WorkerHostname,
+            created_at = j.CreatedAt.ToString("O"),
+            leased_at = j.LeasedAt?.ToString("O"),
+            leased_until = j.LeasedUntil?.ToString("O"),
+            completed_at = j.CompletedAt?.ToString("O"),
+            error = j.Error,
+            has_output = hasOutput,
+            output_content_type = j.OutputContentType,
+            output_kind = ClassifyOutput(j),
+            // Consumer pickup is fire-and-forget (WS broadcast + replayable event store); there is no
+            // per-job acknowledgement, so a completed record here is "delivered but not confirmed".
+            output_proxy_url = hasOutput ? $"/v1/ops/jobs/{Uri.EscapeDataString(j.JobId)}/output" : null,
+            text_reply = j.Kind == JobKind.TextStream ? j.TextReply : null,
+        };
+    }
+
     private static object ToJobDto(JobRecord j) => new
     {
         job_id = j.JobId,
@@ -842,6 +1083,24 @@ public sealed class QuarantineWorkerBody
 {
     public string? Reason { get; set; }
     public string? QuarantinedBy { get; set; }
+}
+
+public sealed class CancelByKeywordRequest
+{
+    [JsonPropertyName("app_id")]
+    public string AppId { get; set; } = "";
+    /// <summary>Literal, case-insensitive substring matched against prompt fields. Required.</summary>
+    [JsonPropertyName("keyword")]
+    public string Keyword { get; set; } = "";
+    [JsonPropertyName("capability")]
+    public string? Capability { get; set; }
+    [JsonPropertyName("include_in_flight")]
+    public bool IncludeInFlight { get; set; } = true;
+    /// <summary>When true, return matches without cancelling (preview count/ids).</summary>
+    [JsonPropertyName("dry_run")]
+    public bool DryRun { get; set; }
+    [JsonPropertyName("delete_s3")]
+    public bool DeleteS3 { get; set; } = true;
 }
 
 public sealed class CancelMatchingRequest

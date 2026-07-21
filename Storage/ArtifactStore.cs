@@ -15,6 +15,13 @@ public interface IArtifactStore
         string jobId, string fileName, string contentType, Stream body, CancellationToken ct);
     Task<(Stream Stream, string ContentType, long Length)?> TryOpenInputStreamAsync(
         string jobId, string fileName, CancellationToken ct);
+    /// <summary>
+    /// Open an artifact by the <c>s3://</c> or <c>file://</c> URL stored on a completed job so ops can
+    /// stream a thumbnail/preview. Returns null when the object is missing or the URL is unsupported.
+    /// This streams bytes only — it never decodes or analyzes the artifact.
+    /// </summary>
+    Task<(Stream Stream, string ContentType, long Length)?> TryOpenArtifactUrlAsync(
+        string url, CancellationToken ct);
     Task DeleteJobArtifactsAsync(string jobId, CancellationToken ct);
     Task DeleteJobArtifactsBatchAsync(IReadOnlyList<string> jobIds, CancellationToken ct);
 }
@@ -67,6 +74,48 @@ public sealed class ArtifactStore : IArtifactStore, IDisposable
         if (!File.Exists(path)) return null;
         var fs = File.OpenRead(path);
         return (fs, GuessContentType(safeName), new FileInfo(path).Length);
+    }
+
+    public async Task<(Stream Stream, string ContentType, long Length)?> TryOpenArtifactUrlAsync(
+        string url, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var trimmed = url.Trim();
+
+        if (trimmed.StartsWith("s3://", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_s3 == null) return null;
+            var rest = trimmed["s3://".Length..];
+            var slash = rest.IndexOf('/');
+            if (slash <= 0 || slash >= rest.Length - 1) return null;
+            var bucket = rest[..slash];
+            var key = rest[(slash + 1)..];
+            try
+            {
+                var resp = await _s3.GetObjectAsync(bucket, key, ct);
+                return (resp.ResponseStream, resp.Headers.ContentType ?? GuessContentType(key), resp.ContentLength);
+            }
+            catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+        }
+
+        if (trimmed.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+        {
+            var path = trimmed["file://".Length..];
+            // Only serve artifacts that live under our own artifact root (URLs are produced by
+            // SaveStreamAsync, but guard against a poisoned record escaping the directory).
+            var root = Path.GetFullPath(_opts.LocalArtifactDir);
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch { return null; }
+            if (!full.StartsWith(root, StringComparison.Ordinal) || !File.Exists(full)) return null;
+            var fs = File.OpenRead(full);
+            return (fs, GuessContentType(full), new FileInfo(full).Length);
+        }
+
+        return null;
     }
 
     public async Task<(string Url, string ContentType)> SaveStreamAsync(
