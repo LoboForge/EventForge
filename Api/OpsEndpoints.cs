@@ -487,6 +487,32 @@ public static class OpsEndpoints
                 });
         });
 
+        app.MapDelete("/v1/ops/workers/{workerId}", (
+            HttpContext ctx,
+            string workerId,
+            WorkerFleetTracker fleet,
+            IOpsKeyValidator opsAuth) =>
+        {
+            if (!AuthHelpers.TryAuthorizeOps(ctx, opsAuth, out _))
+                return Results.Unauthorized();
+            if (string.IsNullOrWhiteSpace(workerId))
+                return Results.BadRequest(new { error = "worker_id required" });
+            // Purge a ghost fleet row (stale check-in whose Vast box no longer exists). A live box
+            // re-appears on its next check-in, so this is non-destructive to healthy workers.
+            var removed = fleet.Remove(workerId);
+            return removed == null
+                ? Results.NotFound(new { error = "worker_not_found", worker_id = workerId })
+                : Results.Ok(new
+                {
+                    removed = true,
+                    worker_id = removed.WorkerId,
+                    hostname = removed.Hostname,
+                    node_uuid = removed.NodeUuid,
+                    last_seen_at = removed.LastSeenAt,
+                    check_in_stale = removed.CheckInStale,
+                });
+        });
+
         app.MapPost("/v1/ops/workers/{workerId}/unquarantine", (
             HttpContext ctx,
             string workerId,

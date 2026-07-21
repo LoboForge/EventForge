@@ -155,6 +155,33 @@ public sealed class WorkerFleetTracker
         return ToSnapshot(stats);
     }
 
+    /// <summary>
+    /// Remove a fleet row entirely (ghost purge). Matches on fleet key, hostname, or node_uuid —
+    /// deliberately NOT the shared worker auth id, so purging one ghost never drops a live box that
+    /// happens to share the same worker key. Returns the removed snapshot, or null if no row matched.
+    /// A live box will simply re-appear on its next check-in.
+    /// </summary>
+    public WorkerSnapshot? Remove(string workerIdOrHostname)
+    {
+        if (string.IsNullOrWhiteSpace(workerIdOrHostname)) return null;
+        var key = workerIdOrHostname.Trim();
+
+        if (_workers.TryRemove(key, out var byKey))
+            return ToSnapshot(byKey);
+
+        foreach (var entry in _workers)
+        {
+            var stats = entry.Value;
+            if (string.Equals(stats.Hostname, key, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(stats.NodeUuid, key, StringComparison.OrdinalIgnoreCase))
+            {
+                if (_workers.TryRemove(entry.Key, out var removed))
+                    return ToSnapshot(removed);
+            }
+        }
+        return null;
+    }
+
     public bool IsQuarantined(string? hostname)
     {
         if (string.IsNullOrWhiteSpace(hostname)) return false;

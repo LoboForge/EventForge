@@ -137,4 +137,55 @@ public sealed class WorkerFleetTrackerTests
         fleet.Snapshot().Workers.Should().HaveCount(1);
         fleet.TryGetWorker("wrath-box").Should().NotBeNull();
     }
+
+    [Fact]
+    public void Remove_by_hostname_purges_only_that_ghost_row()
+    {
+        var fleet = new WorkerFleetTracker();
+        fleet.RegisterCheckIn("wrath", new WorkerCheckInPayload
+        {
+            NodeUuid = "node-ghost",
+            Hostname = "loboforge-video-45334799",
+            Transport = "eventforge",
+        });
+        fleet.RegisterCheckIn("wrath", new WorkerCheckInPayload
+        {
+            NodeUuid = "node-live",
+            Hostname = "loboforge-video-45337627",
+            Transport = "eventforge",
+        });
+
+        var removed = fleet.Remove("loboforge-video-45334799");
+
+        removed.Should().NotBeNull();
+        removed!.Hostname.Should().Be("loboforge-video-45334799");
+        fleet.Snapshot().Workers.Should().HaveCount(1);
+        fleet.TryGetWorker("node-live")!.Hostname.Should().Be("loboforge-video-45337627");
+        fleet.TryGetWorker("node-ghost").Should().BeNull();
+    }
+
+    [Fact]
+    public void Remove_by_node_uuid_purges_row()
+    {
+        var fleet = new WorkerFleetTracker();
+        fleet.RegisterCheckIn("wrath", new WorkerCheckInPayload
+        {
+            NodeUuid = "node-ghost",
+            Hostname = "loboforge-wan-native-45265221",
+            Transport = "eventforge",
+        });
+
+        fleet.Remove("node-ghost").Should().NotBeNull();
+        fleet.Snapshot().Workers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Remove_unknown_id_returns_null()
+    {
+        var fleet = new WorkerFleetTracker();
+        fleet.OnClaim("wrath", "loboforge-image-1", "flux", "normal", "job-1");
+
+        fleet.Remove("does-not-exist").Should().BeNull();
+        fleet.Snapshot().Workers.Should().HaveCount(1);
+    }
 }

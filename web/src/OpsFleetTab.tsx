@@ -47,10 +47,11 @@ function ModelList({ title, items }: { title: string; items: string[] }) {
   )
 }
 
-function WorkerDetail({ w, onQuarantine, onUnquarantine, busy }: {
+function WorkerDetail({ w, onQuarantine, onUnquarantine, onRemove, busy }: {
   w: WorkerRow
   onQuarantine: (id: string) => void
   onUnquarantine: (id: string) => void
+  onRemove: (id: string) => void
   busy: string | null
 }) {
   return (
@@ -89,6 +90,21 @@ function WorkerDetail({ w, onQuarantine, onUnquarantine, busy }: {
                 </button>
               )}
             </dd>
+            {w.checkInStale && (
+              <>
+                <dt>Ghost row</dt>
+                <dd>
+                  <button
+                    className="btn warn small"
+                    disabled={busy === `rm:${workerFleetRowKey(w)}`}
+                    onClick={() => onRemove(w.hostname || w.nodeUuid || w.workerId)}
+                    title="Delete this fleet row. A live box re-appears on its next check-in."
+                  >
+                    Remove ghost row
+                  </button>
+                </dd>
+              </>
+            )}
           </dl>
         </div>
         <div className="detail-block">
@@ -163,6 +179,21 @@ export function OpsFleetTab({ workers, onRefresh }: { workers: WorkerRow[]; onRe
     try {
       await opsFetch(`/v1/ops/workers/${encodeURIComponent(id)}/unquarantine`, { method: 'POST' })
       setMsg(`Unquarantined ${id}`)
+      onRefresh?.()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function removeWorker(id: string) {
+    if (!confirm(`Remove fleet row "${id}"? A live box re-appears on its next check-in; use this to purge ghost rows whose Vast box no longer exists.`)) return
+    setBusy(`rm:${id}`)
+    setErr(null)
+    try {
+      await opsFetch(`/v1/ops/workers/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      setMsg(`Removed ${id}`)
       onRefresh?.()
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -341,7 +372,7 @@ export function OpsFleetTab({ workers, onRefresh }: { workers: WorkerRow[]; onRe
           if (expanded !== key) return null
           return (
             <tr className="fleet-detail-row">
-              <td colSpan={columns.length}><WorkerDetail w={w} onQuarantine={(id) => void quarantineWorker(id)} onUnquarantine={(id) => void unquarantineWorker(id)} busy={busy} /></td>
+              <td colSpan={columns.length}><WorkerDetail w={w} onQuarantine={(id) => void quarantineWorker(id)} onUnquarantine={(id) => void unquarantineWorker(id)} onRemove={(id) => void removeWorker(id)} busy={busy} /></td>
             </tr>
           )
         }}
