@@ -333,6 +333,98 @@ public sealed class OpsQueueModerationTests : IClassFixture<OpsModerationWebAppl
             doc.RootElement.GetProperty("error").GetString().Should().Be("cancelled_by_ops");
         }
     }
+
+    [Fact]
+    public async Task Cancel_queued_job_removes_it_from_queue()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var jobId = $"cancel-q-{suffix}";
+        await EnqueueAsync(jobId, "dev-local-key", "cancel_queued_prompt");
+
+        using (var cancel = Ops(HttpMethod.Post, $"/v1/ops/jobs/{jobId}/cancel",
+                   """{"include_in_flight":false,"delete_artifacts":true}"""))
+        {
+            using var resp = await _client.SendAsync(cancel);
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            doc.RootElement.GetProperty("job_id").GetString().Should().Be(jobId);
+            doc.RootElement.GetProperty("cancelled").GetBoolean().Should().BeTrue();
+        }
+
+        using (var list = Ops(HttpMethod.Get, "/v1/ops/jobs?status=queued&limit=500"))
+        {
+            using var resp = await _client.SendAsync(list);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            var ids = doc.RootElement.GetProperty("jobs").EnumerateArray()
+                .Select(j => j.GetProperty("job_id").GetString())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            ids.Should().NotContain(jobId);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_missing_job_returns_404_not_bare()
+    {
+        using var cancel = Ops(HttpMethod.Post, "/v1/ops/jobs/does-not-exist-xyz/cancel",
+            """{"include_in_flight":true,"delete_artifacts":true}""");
+        using var resp = await _client.SendAsync(cancel);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        doc.RootElement.GetProperty("error").GetString().Should().Be("job_not_found");
+    }
+
+    [Fact]
+    public async Task Cancel_in_flight_without_include_returns_409_and_leaves_job_running()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var jobId = $"inflight-skip-{suffix}";
+        var hostname = $"loboforge-image-skip-{suffix}";
+        var capability = $"mod-skip-{suffix}";
+        await EnqueueAsync(jobId, "dev-local-key", "inflight_skip_prompt", capability);
+        await EnsureWorkerAsync(hostname, capability);
+
+        using (var claim = new HttpRequestMessage(HttpMethod.Post, "/v1/jobs/claim")
+        {
+            Content = new StringContent(
+                $$"""{"hostname":"{{hostname}}","capabilities":["{{capability}}"]}""",
+                Encoding.UTF8,
+                "application/json"),
+        })
+        {
+            claim.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrath-worker-key");
+            using var claimResp = await _client.SendAsync(claim);
+            claimResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+
+        // Queued-tab semantics: include_in_flight=false must NOT 404 — it reports the in-flight state.
+        using (var cancel = Ops(HttpMethod.Post, $"/v1/ops/jobs/{jobId}/cancel",
+                   """{"include_in_flight":false,"delete_artifacts":true}"""))
+        {
+            using var resp = await _client.SendAsync(cancel);
+            resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            doc.RootElement.GetProperty("error").GetString().Should().Be("job_in_flight");
+        }
+
+        // Job is untouched and still leased.
+        using (var get = Ops(HttpMethod.Get, $"/v1/ops/jobs/{jobId}"))
+        {
+            using var resp = await _client.SendAsync(get);
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            doc.RootElement.GetProperty("status").GetString().Should().Be("leased");
+        }
+
+        // Opting in cancels it.
+        using (var cancel = Ops(HttpMethod.Post, $"/v1/ops/jobs/{jobId}/cancel",
+                   """{"include_in_flight":true,"delete_artifacts":true}"""))
+        {
+            using var resp = await _client.SendAsync(cancel);
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            doc.RootElement.GetProperty("status").GetString().Should().Be("failed");
+        }
+    }
 }
 
 public sealed class OpsModerationWebApplicationFactory : WebApplicationFactory<Program>

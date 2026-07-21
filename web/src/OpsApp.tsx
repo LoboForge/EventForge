@@ -361,7 +361,7 @@ function QueueTab({
     {
       id: 'actions', header: '', sortable: false, className: 'actions-cell',
       render: (r) => (
-        <button className="btn secondary small" disabled={busyId === r.job_id} onClick={() => void cancelJob(r.job_id, false)}>
+        <button className="btn secondary small" disabled={busyId === r.job_id} onClick={() => void cancelJob(r.job_id, true)}>
           {busyId === r.job_id ? '…' : 'Cancel'}
         </button>
       ),

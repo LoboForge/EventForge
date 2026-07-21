@@ -40,6 +40,24 @@ public sealed record JobDeletionResult(
     int EventsDeleted,
     bool ActiveConflict);
 
+/// <summary>Outcome of an ops cancel request for a single job.</summary>
+public enum CancelJobOutcome
+{
+    /// <summary>No job record exists for the id.</summary>
+    NotFound,
+    /// <summary>Job was queued and was removed from the queue.</summary>
+    CancelledQueued,
+    /// <summary>Job was leased/streaming and was failed (cancelled_by_ops).</summary>
+    CancelledInFlight,
+    /// <summary>Job is running on a worker but the caller did not opt in to cancelling in-flight work.</summary>
+    InFlightSkipped,
+    /// <summary>Job already completed or failed; nothing to cancel.</summary>
+    AlreadyTerminal,
+}
+
+/// <summary>Result of <see cref="JobService.CancelJobAsync"/>.</summary>
+public readonly record struct CancelJobResult(CancelJobOutcome Outcome, JobRecord? Job);
+
 public sealed class JobService
 {
     /// <summary>Sticky error markers written when a job is cancelled. A late worker
@@ -882,30 +900,35 @@ public sealed class JobService
         return null;
     }
 
-    public async Task<(JobRecord Job, bool Removed)?> CancelJobAsync(
+    public async Task<CancelJobResult> CancelJobAsync(
         string jobId,
         bool includeInFlight,
         bool deleteArtifacts,
         CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(jobId)) return null;
+        if (string.IsNullOrWhiteSpace(jobId)) return new CancelJobResult(CancelJobOutcome.NotFound, null);
         var job = await _persist.TryGetJobAsync(jobId.Trim(), ct);
-        if (job == null) return null;
+        if (job == null) return new CancelJobResult(CancelJobOutcome.NotFound, null);
 
         if (job.Status == JobStatus.Queued)
         {
             var removed = _queue.RemoveWhere(j => string.Equals(j.JobId, job.JobId, StringComparison.OrdinalIgnoreCase));
-            if (removed.Count == 0) return null;
+            if (removed.Count == 0) return new CancelJobResult(CancelJobOutcome.NotFound, null);
             if (deleteArtifacts)
                 await _artifacts.DeleteJobArtifactsBatchAsync([job.JobId], ct);
             await _persist.DeleteJobsAsync([job.JobId], ct);
             _persist.MarkDirty();
             _log.LogInformation("Ops cancelled queued job {Job} app={App}", job.JobId, job.AppId);
-            return (removed[0], true);
+            return new CancelJobResult(CancelJobOutcome.CancelledQueued, removed[0]);
         }
 
-        if (job.Status is JobStatus.Leased or JobStatus.Streaming && includeInFlight)
+        if (job.Status is JobStatus.Leased or JobStatus.Streaming)
         {
+            // Job is running on a worker. Only fail it when the caller opts in; otherwise report the
+            // in-flight state so the ops UI can show a clear message instead of a bare 404.
+            if (!includeInFlight)
+                return new CancelJobResult(CancelJobOutcome.InFlightSkipped, job);
+
             job.Status = JobStatus.Failed;
             job.Error = "cancelled_by_ops";
             job.CompletedAt = DateTimeOffset.UtcNow;
@@ -915,10 +938,11 @@ public sealed class JobService
             await EmitLifecycleEventAsync(job, ForgeEventTypes.Failed, "failed", job.WorkerHostname, job.Error, ct);
             await PublishOpsJobEventAsync("ops.job.cancelled", job, ct);
             _log.LogInformation("Ops cancelled in-flight job {Job} app={App}", job.JobId, job.AppId);
-            return (job, false);
+            return new CancelJobResult(CancelJobOutcome.CancelledInFlight, job);
         }
 
-        return null;
+        // Completed/failed jobs cannot be cancelled — surface a clear terminal signal.
+        return new CancelJobResult(CancelJobOutcome.AlreadyTerminal, job);
     }
 
     private async Task<JobRecord?> GetJobOwnedByAppAsync(string jobId, string appId, CancellationToken ct)

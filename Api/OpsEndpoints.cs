@@ -566,14 +566,37 @@ public static class OpsEndpoints
                 return Results.Unauthorized();
             var result = await jobs.CancelJobAsync(
                 jobId, body?.IncludeInFlight == true, body?.DeleteArtifacts == true, ct);
-            if (result == null) return Results.NotFound();
-            return Results.Ok(new
+            switch (result.Outcome)
             {
-                job_id = result.Value.Job.JobId,
-                app_id = result.Value.Job.AppId,
-                status = result.Value.Job.Status,
-                cancelled = result.Value.Removed,
-            });
+                case CancelJobOutcome.NotFound:
+                    return Results.NotFound(new { job_id = jobId, error = "job_not_found" });
+                case CancelJobOutcome.InFlightSkipped:
+                    return Results.Json(new
+                    {
+                        job_id = result.Job!.JobId,
+                        app_id = result.Job.AppId,
+                        status = result.Job.Status,
+                        error = "job_in_flight",
+                        message = "Job is already running on a worker. Retry with include_in_flight=true to fail it.",
+                    }, statusCode: StatusCodes.Status409Conflict);
+                case CancelJobOutcome.AlreadyTerminal:
+                    return Results.Json(new
+                    {
+                        job_id = result.Job!.JobId,
+                        app_id = result.Job.AppId,
+                        status = result.Job.Status,
+                        error = "job_already_terminal",
+                        message = "Job already completed or failed; use delete to remove its output artifact.",
+                    }, statusCode: StatusCodes.Status409Conflict);
+                default:
+                    return Results.Ok(new
+                    {
+                        job_id = result.Job!.JobId,
+                        app_id = result.Job.AppId,
+                        status = result.Job.Status,
+                        cancelled = result.Outcome == CancelJobOutcome.CancelledQueued,
+                    });
+            }
         });
 
         app.MapPost("/v1/ops/jobs/{jobId}/reemit-completion", async (
