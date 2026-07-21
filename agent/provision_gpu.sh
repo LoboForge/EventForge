@@ -34,6 +34,11 @@
 
 set -euo pipefail
 
+# Vast's Python venv is not always exported on PATH. Model/LoRA helpers invoke
+# its `hf` and `gdown` console scripts by name, so make installed tools visible
+# before the first active-LoRA pull instead of silently skipping every Drive URL.
+[[ -d /venv/main/bin ]] && export PATH="/venv/main/bin:$PATH"
+
 for _lf_ops_ssh in "$(dirname "${BASH_SOURCE[0]}")/ensure_ops_ssh.sh" "/workspace/ensure_ops_ssh.sh"; do
   [[ -f "$_lf_ops_ssh" ]] && . "$_lf_ops_ssh" && break
 done
@@ -694,11 +699,22 @@ upgrade_comfyui_for_lens() {
 
 lobo_fetch_agent_scripts() {
     local dir="${1:-${LOBO_AGENT_DIR:-/workspace}}"
-    local base="${LOBO_BASE_URL:-https://www.loboforge.com}"
+    local base f fetched tmp
+    local bases=("${EVENT_FORGE_URL:-https://eventforge.loboforge.com}")
+    bases+=("${LOBO_BASE_URL:-https://www.loboforge.com}")
     mkdir -p "$dir"
-    local f
-    for f in loboforge_agent.py loboforge_agent_sqs.py loboforge_agent_common.py wd14_tagger.py; do
-        if ! curl -fsSL -A 'LoboForge-Worker/1.1' "$base/agent/$f" -o "$dir/$f"; then
+    for f in loboforge_agent.py loboforge_agent_sqs.py loboforge_agent_eventforge.py loboforge_agent_common.py wd14_tagger.py; do
+        fetched=""
+        tmp="$dir/.$f.download"
+        for base in "${bases[@]}"; do
+            if curl -fsSL -A 'LoboForge-Worker/1.1' "${base%/}/agent/$f" -o "$tmp"; then
+                mv -f "$tmp" "$dir/$f"
+                fetched=1
+                break
+            fi
+        done
+        rm -f "$tmp"
+        if [[ -z "$fetched" ]]; then
             [[ "$f" == "wd14_tagger.py" ]] && continue
             return 1
         fi

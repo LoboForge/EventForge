@@ -114,6 +114,10 @@ unset _gen_queue
 
 PY="/venv/main/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
+# Worker helpers invoke the `hf` and `gdown` console scripts by name. Vast's
+# venv is not consistently on PATH even though those packages are installed,
+# which made every Google Drive LoRA falsely report "gdown not installed".
+export PATH="$(dirname "$PY"):$PATH"
 
 # Durable hf-hub pin BEFORE any pip install — transformers 4.x needs hf-hub<1.0, and
 # later job-time pip installs otherwise upgrade it to 1.x and break every job. Skipped
@@ -124,8 +128,23 @@ if [[ -z "${PIP_CONSTRAINT:-}" ]] && ! "$PY" -c 'import transformers,sys; sys.ex
   export PIP_CONSTRAINT="/workspace/pip-constraints.txt"
 fi
 
-# Agent imports need these before bootstrap touches loboforge_agent.py.
-"$PY" -m pip install -q -U websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" boto3 2>/dev/null || true
+# Agent imports need these before bootstrap touches loboforge_agent.py. Do not
+# silently treat a failed install as success: retry verbosely, then fail closed
+# if the required transport modules are still unavailable. gdown is optional
+# for vanilla jobs but must be diagnosed explicitly for hub-backed LoRA sync.
+_lf_agent_deps=(websockets aiohttp gdown "huggingface_hub>=0.36.2,<1.0" boto3)
+if ! "$PY" -m pip install -q -U "${_lf_agent_deps[@]}"; then
+  echo "[WARN] Quiet agent dependency install failed; retrying with diagnostics." >&2
+  "$PY" -m pip install -U "${_lf_agent_deps[@]}" || true
+fi
+if ! "$PY" -c 'import aiohttp, boto3, huggingface_hub, websockets'; then
+  echo "ERROR: required EventForge agent dependencies are not importable after retry." >&2
+  exit 1
+fi
+if ! "$PY" -c 'import gdown' || ! command -v gdown >/dev/null 2>&1; then
+  echo "[WARN] gdown unavailable after install; vanilla jobs remain enabled, Drive-backed LoRA sync will self-heal after dependency repair." >&2
+fi
+unset _lf_agent_deps
 
 # Always refresh from prod — onstart only runs once; a failed first attempt must not
 # leave a stale loboforge_worker tree (regression: import-before-pip in old bundle).
@@ -163,6 +182,23 @@ if type lobo_write_persisted_env &>/dev/null; then
 fi
 
 "$PY" -m loboforge_worker bootstrap --mode "$MODE" 2>&1 | tee /workspace/provision.log
+
+# The bootstrap package starts its supervisor before returning. Older bundles
+# refreshed the agent from LOBO_BASE_URL (the hub), which could overwrite the
+# current EventForge transport with a stale copy. Reassert the authoritative
+# EventForge-first copies and restart the supervisor once so new agent logic is
+# actually loaded; do not wait for the long-running model download.
+if [[ "$_norm_mode" == "video" || "$_norm_mode" == "all" ]]; then
+  _lf_fetch loboforge_agent.py /workspace/loboforge_agent.py
+  _lf_fetch loboforge_agent_common.py /workspace/loboforge_agent_common.py
+  _lf_fetch loboforge_agent_eventforge.py /workspace/loboforge_agent_eventforge.py
+  _lf_fetch restart-wan-agent.sh /workspace/restart-wan-agent.sh
+  chmod +x /workspace/restart-wan-agent.sh
+  if ! bash /workspace/restart-wan-agent.sh >> /workspace/provision.log 2>&1; then
+    echo "[WARN] Fresh agent scripts installed but supervisor restart failed; cron watchdog will retry." \
+      | tee -a /workspace/provision.log
+  fi
+fi
 
 # LoRA sync for this box's mode (image/video/all) from loboforge.com.
 #

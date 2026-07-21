@@ -262,16 +262,32 @@ def launch_agent_tmux(args: BootstrapArgs, *, hostname: str) -> dict:
     agent_cmd = " ".join(_shell_quote(p) for p in cmd_parts)
     env_file = Path(args.agent_dir) / ".loboforge-env"
     source_env = f'[[ -f "{env_file}" ]] && . "{env_file}"; '
-    refresh_agent = (
-        f'curl -fsSL "{args.base_url.rstrip("/")}/agent/loboforge_agent.py" '
-        f'-o "{agent_dir}/loboforge_agent.py" 2>/dev/null || true; '
-        f'curl -fsSL "{args.base_url.rstrip("/")}/agent/loboforge_agent_sqs.py" '
-        f'-o "{agent_dir}/loboforge_agent_sqs.py" 2>/dev/null || true; '
-        f'curl -fsSL "{args.base_url.rstrip("/")}/agent/loboforge_agent_eventforge.py" '
-        f'-o "{agent_dir}/loboforge_agent_eventforge.py" 2>/dev/null || true; '
-        f'curl -fsSL "{args.base_url.rstrip("/")}/agent/loboforge_agent_common.py" '
-        f'-o "{agent_dir}/loboforge_agent_common.py" 2>/dev/null || true; '
-    )
+    # EventForge owns the worker transport and serves the authoritative agent
+    # scripts. Fetching only from args.base_url (the LoboForge hub) silently
+    # replaced freshly provisioned workers with its older agent copies. That
+    # removed claim-ready reconciliation, so completed Wan boxes stayed at
+    # claim_ready=none until a human copied scripts and restarted the agent.
+    # Use an atomic temp file so a failed/partial fetch cannot truncate a
+    # previously working script; retain the hub only as an availability fallback.
+    eventforge_url = (os.environ.get("EVENT_FORGE_URL") or "https://eventforge.loboforge.com").rstrip("/")
+    refresh_bases = list(dict.fromkeys((eventforge_url, args.base_url.rstrip("/"))))
+    quoted_bases = " ".join(_shell_quote(base) for base in refresh_bases if base)
+    refresh_agent = ""
+    for filename in (
+        "loboforge_agent.py",
+        "loboforge_agent_sqs.py",
+        "loboforge_agent_eventforge.py",
+        "loboforge_agent_common.py",
+    ):
+        destination = agent_dir / filename
+        temp = agent_dir / f".{filename}.download"
+        refresh_agent += (
+            f'for _lf_base in {quoted_bases}; do '
+            f'if curl -fsSL -A "LoboForge-Worker/1.1" "$_lf_base/agent/{filename}" '
+            f'-o "{temp}" 2>/dev/null; then '
+            f'mv -f "{temp}" "{destination}"; break; fi; done; '
+            f'rm -f "{temp}"; '
+        )
     queue_exports = ""
     if use_sqs or use_ef:
         from ..capabilities import forge_queue_capabilities_for_mode

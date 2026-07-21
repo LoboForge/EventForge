@@ -268,11 +268,14 @@ ak = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("FORGE_QUEUE_ACCESS_K
 sk = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ.get("FORGE_QUEUE_SECRET_KEY") or ""
 keys = {
     "LOBO_GEN_QUEUE": os.environ.get("LOBO_GEN_QUEUE", "sqs"),
+    "LOBO_SECRET": os.environ.get("LOBO_SECRET", ""),
     "LOBO_BASE_URL": (
         "https://www.loboforge.com"
         if "eventforge.loboforge.com" in (os.environ.get("LOBO_BASE_URL") or "").lower()
         else (os.environ.get("LOBO_BASE_URL") or "https://www.loboforge.com")
     ),
+    "LOBO_LABEL": os.environ.get("LOBO_LABEL", ""),
+    "LOBO_HOSTNAME": os.environ.get("LOBO_HOSTNAME", ""),
     "LOBO_MODE": os.environ.get("LOBO_MODE") or os.environ.get("MODE", ""),
     "MODE": os.environ.get("MODE") or os.environ.get("LOBO_MODE", ""),
     "LOBO_WAN": os.environ.get("LOBO_WAN", ""),
@@ -283,6 +286,7 @@ keys = {
     "FORGE_QUEUE_PREFIX": os.environ.get("FORGE_QUEUE_PREFIX", "fq"),
     "FORGE_QUEUE_CAPABILITY": os.environ.get("FORGE_QUEUE_CAPABILITY", ""),
     "PIP_CONSTRAINT": os.environ.get("PIP_CONSTRAINT", ""),
+    "PATH": os.environ.get("PATH", ""),
     "EVENT_FORGE_URL": os.environ.get("EVENT_FORGE_URL", ""),
     "EVENT_FORGE_WORKER_KEY": os.environ.get("EVENT_FORGE_WORKER_KEY", ""),
     "AWS_ACCESS_KEY_ID": ak,
@@ -312,6 +316,7 @@ for key, val in keys.items():
         out.append(f'export {key}="{val}"')
 pathlib.Path(path).write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 PY
+  chmod 600 "$env_file" 2>/dev/null || true
 }
 
 lobo_source_persisted_env() {

@@ -181,6 +181,11 @@ fix_one() {
       "$ROOT/vendor/loboforge_worker/provision/bootstrap_box.py" \
       "root@${host}:/workspace/loboforge_worker/provision/bootstrap_box.py"
   fi
+  if [[ -f "$ROOT/vendor/loboforge_worker/provision/download_url.py" ]]; then
+    scp -q -P "$port" -o StrictHostKeyChecking=no -o ConnectTimeout=60 \
+      "$ROOT/vendor/loboforge_worker/provision/download_url.py" \
+      "root@${host}:/workspace/loboforge_worker/provision/download_url.py"
+  fi
   if [[ -f "$ROOT/agent/worker-bootstrap-env.sh" ]]; then
     scp -q -P "$port" -o StrictHostKeyChecking=no -o ConnectTimeout=60 \
       "$ROOT/agent/worker-bootstrap-env.sh" "root@${host}:/workspace/worker-bootstrap-env.sh"

@@ -37,10 +37,12 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 sleep 1
 
 export PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"
+export PATH="$(dirname "$PY"):$PATH"
 
 tmux new-session -d -s "$SESSION" "bash -lc '
   set -a; . \"$ENV_FILE\"; set +a
   export PYTHONPATH=/workspace
+  export PATH=\"$(dirname "$PY"):\$PATH\"
   while true; do
     echo \"[\$(date -Is)] starting agent (eventforge wan comfy=$COMFY_HTTP)\" | tee -a \"$LOG\";
     \"$PY\" \"$AGENT\" --secret \"\$LOBO_SECRET\" --hostname \"$HN\" --comfyui-http \"$COMFY_HTTP\" --comfyui-ws \"$COMFY_WS\" 2>&1 | tee -a \"$LOG\";
